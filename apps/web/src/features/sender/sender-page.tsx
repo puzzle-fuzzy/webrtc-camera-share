@@ -18,6 +18,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Separator } from "@/components/ui/separator"
+import { PageShell } from "@/features/page-shell"
 import { SessionFields } from "@/features/session-fields"
 import {
   persistSession,
@@ -72,7 +73,7 @@ export function SenderPage() {
     : "发送端"
 
   return (
-    <main className="mx-auto flex min-h-svh w-full max-w-3xl items-center p-4 md:p-6">
+    <PageShell>
       <Card className="w-full">
         <CardHeader>
           <CardTitle>发送端</CardTitle>
@@ -99,25 +100,36 @@ export function SenderPage() {
           />
           <StatusAlert destructive={Boolean(issue)} message={status} />
         </CardContent>
-        <CardFooter className="flex flex-wrap gap-2">
+        <CardFooter className="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap">
           {sender.running ? (
-            <Button variant="destructive" onClick={() => sender.stop()}>
+            <Button
+              variant="destructive"
+              size="lg"
+              onClick={() => sender.stop()}
+            >
               <SquareIcon data-icon="inline-start" />
               停止发送
             </Button>
           ) : (
-            <Button onClick={start}>
+            <Button size="lg" onClick={start}>
               <CameraIcon data-icon="inline-start" />
               开始发送
             </Button>
           )}
-          <Button variant="secondary" onClick={copyReceiverLink} disabled={sender.running}>
+          <Button
+            variant="secondary"
+            size="lg"
+            onClick={copyReceiverLink}
+            disabled={sender.running}
+          >
             <CopyIcon data-icon="inline-start" />
             复制接收链接
           </Button>
           {shareUrl ? (
             <a
-              className={cn(buttonVariants({ variant: "outline" }))}
+              className={cn(
+                buttonVariants({ variant: "outline", size: "lg" }),
+              )}
               href={shareUrl.href}
               target="_blank"
               rel="noreferrer"
@@ -126,13 +138,13 @@ export function SenderPage() {
               <ExternalLinkIcon data-icon="inline-end" />
             </a>
           ) : (
-            <Button variant="outline" disabled>
+            <Button variant="outline" size="lg" disabled>
               打开接收端
               <ExternalLinkIcon data-icon="inline-end" />
             </Button>
           )}
         </CardFooter>
       </Card>
-    </main>
+    </PageShell>
   )
 }

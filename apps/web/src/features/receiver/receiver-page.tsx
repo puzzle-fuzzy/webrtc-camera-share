@@ -13,6 +13,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Separator } from "@/components/ui/separator"
+import { PageShell } from "@/features/page-shell"
 import { useReceiver } from "@/features/receiver/use-receiver"
 import { SessionFields } from "@/features/session-fields"
 import {
@@ -67,7 +68,7 @@ export function ReceiverPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-svh w-full max-w-3xl items-center p-4 md:p-6">
+    <PageShell>
       <Card className="w-full">
         <CardHeader>
           <CardTitle>接收端</CardTitle>
@@ -97,20 +98,26 @@ export function ReceiverPage() {
             message={issue?.message ?? receiver.status}
           />
         </CardContent>
-        <CardFooter className="flex flex-wrap gap-2">
+        <CardFooter className="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap">
           {receiver.running ? (
-            <Button variant="destructive" onClick={() => receiver.stop()}>
+            <Button
+              variant="destructive"
+              size="lg"
+              onClick={() => receiver.stop()}
+            >
               <SquareIcon data-icon="inline-start" />
               停止接收
             </Button>
           ) : (
-            <Button onClick={start}>
+            <Button size="lg" onClick={start}>
               <PlayIcon data-icon="inline-start" />
               开始接收
             </Button>
           )}
           <a
-            className={cn(buttonVariants({ variant: "outline" }))}
+            className={cn(
+              buttonVariants({ variant: "outline", size: "lg" }),
+            )}
             href="/send"
           >
             <CameraIcon data-icon="inline-start" />
@@ -118,6 +125,6 @@ export function ReceiverPage() {
           </a>
         </CardFooter>
       </Card>
-    </main>
+    </PageShell>
   )
 }

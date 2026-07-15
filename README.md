@@ -15,6 +15,7 @@
 - 提供 `/health`、`/ready`、`/metrics`、请求 ID、WebSocket 心跳及安全响应头
 - 全局、单 IP、房间、接收端、鉴权、消息速率、消息大小及信令队列数量/字节数均有明确上限
 - 配置请求、媒体流、WebSocket 与 PeerConnection 均有取消、超时和断线清理机制
+- 提供 `/about` 项目说明页，并在全部页面提供 GitHub 仓库入口
 - 兼容旧入口 `/send.html` 与 `/recv.html`
 
 ## 技术栈
@@ -59,6 +60,7 @@ bun run dev
 - 前端开发服务器：`http://127.0.0.1:5173/send`
 - Rust 后台：`http://127.0.0.1:5011`
 - 接收端：`http://127.0.0.1:5173/recv`
+- About：`http://127.0.0.1:5173/about`
 
 Vite 会把 `/ws`、`/config`、`/health`、`/ready` 与 `/metrics` 代理到 Rust 后台。
 
@@ -124,6 +126,8 @@ bun run verify
 3. 点击“复制接收链接”，把链接发送给接收者。访问码位于链接的 URL Fragment 中，不会进入 HTTP 请求日志。
 4. 接收者打开链接并点击“开始接收”；也可以打开 `/recv`，手动填写相同房间 ID 和访问码。
 5. 发送者点击“停止发送”即可释放摄像头和全部连接；刷新或关闭页面也会自动清理资源。
+
+页面底部的 `About` 可查看项目架构说明，`GitHub` 会打开源码仓库：`https://github.com/puzzle-fuzzy/webrtc-camera-share`。
 
 生产部署前先执行：
 
