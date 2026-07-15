@@ -15,23 +15,74 @@
       background: #111;
       color: #fff;
       font-family: system-ui, sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
       min-height: 100dvh;
       padding: 16px;
+      display: grid;
+      place-items: center
+    }
+
+    main {
+      width: 100%;
+      max-width: 640px;
+      display: flex;
+      flex-direction: column;
       gap: 16px
     }
 
-    h2 {
-      font-size: 16px;
-      font-weight: 500
+    .page-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 650;
+      line-height: 1.25
+    }
+
+    .role-label {
+      color: #a7f3d0;
+      font-size: 13px
+    }
+
+    .session {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+      color: #d4d4d4;
+      font-size: 13px
+    }
+
+    input {
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid #525252;
+      border-radius: 8px;
+      background: #1c1c1c;
+      color: #fff;
+      padding: 10px 12px;
+      font: inherit
+    }
+
+    input::placeholder {
+      color: #a3a3a3
+    }
+
+    input:disabled {
+      cursor: not-allowed;
+      opacity: .65
     }
 
     video {
       width: 100%;
-      max-width: 640px;
       aspect-ratio: 16 / 9;
       border-radius: 8px;
       background: #000;
@@ -39,22 +90,31 @@
     }
 
     p {
+      min-height: 20px;
       font-size: 13px;
-      color: #888;
+      color: #a3a3a3;
       text-align: center
     }
 
     .btns {
       display: flex;
+      justify-content: center;
       gap: 12px
     }
 
     button {
+      min-height: 44px;
       padding: 12px 32px;
       border: none;
       border-radius: 8px;
       font-size: 15px;
       cursor: pointer
+    }
+
+    button:focus-visible,
+    input:focus-visible {
+      outline: 3px solid #4ade80;
+      outline-offset: 2px
     }
 
     .start {
@@ -72,8 +132,8 @@
         padding: env(safe-area-inset-top, 12px) 12px env(safe-area-inset-bottom, 12px)
       }
 
-      h2 {
-        font-size: 14px
+      h1 {
+        font-size: 18px
       }
 
       video {
@@ -86,120 +146,260 @@
         font-size: 16px
       }
     }
+
+    @media (max-width: 440px) {
+      .session {
+        grid-template-columns: 1fr
+      }
+    }
   </style>
 </head>
 
 <body>
+  <main>
+    <header class="page-header">
+      <h1>接收端</h1>
+      <span class="role-label">远端视频画面</span>
+    </header>
 
-  <h2>接收端</h2>
-  <video id="remoteVideo" autoplay playsinline></video>
-  <p id="status">点击按钮接收视频流</p>
-  <button class="start" id="startBtn">开始</button>
-  <button class="stop" id="stopBtn" style="display:none">停止</button>
+    <section class="session" aria-label="会话设置">
+      <label class="field">
+        房间 ID
+        <input id="roomInput" type="text" autocomplete="off" maxlength="32" spellcheck="false"
+          placeholder="从发送端获取">
+      </label>
+      <label class="field">
+        访问码
+        <input id="accessCodeInput" type="password" autocomplete="off" minlength="6" maxlength="32"
+          placeholder="从发送端获取">
+      </label>
+    </section>
+
+    <video id="remoteVideo" autoplay playsinline aria-label="远端摄像头画面"></video>
+    <p id="status" role="status" aria-live="polite">输入房间信息或使用发送端分享链接</p>
+    <div class="btns">
+      <button class="start" id="startBtn" type="button">开始接收</button>
+      <button class="stop" id="stopBtn" type="button" style="display:none">停止接收</button>
+    </div>
+  </main>
 
   <script>
     const remoteVideo = document.getElementById("remoteVideo");
     const status = document.getElementById("status");
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
+    const roomInput = document.getElementById("roomInput");
+    const accessCodeInput = document.getElementById("accessCodeInput");
 
     let pc = null, ws = null;
     let iceCandidatesQueue = [];
 
+    const roomPattern = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/;
+    const accessCodePattern = /^[A-Za-z0-9]{6,32}$/;
+
+    function readSession() {
+      const room = roomInput.value.trim().toLowerCase();
+      const key = accessCodeInput.value.trim();
+
+      if (!roomPattern.test(room)) {
+        status.textContent = "房间 ID 需为 3 到 32 位小写字母、数字或连字符";
+        return null;
+      }
+      if (!accessCodePattern.test(key)) {
+        status.textContent = "访问码需为 6 到 32 位字母或数字";
+        return null;
+      }
+
+      roomInput.value = room;
+      return { room, key };
+    }
+
+    function saveSessionHash(session) {
+      const hash = new URLSearchParams(session).toString();
+      history.replaceState(null, "", location.pathname + location.search + "#" + hash);
+    }
+
+    function loadSessionHash() {
+      if (ws) return;
+      const params = new URLSearchParams(location.hash.slice(1));
+      roomInput.value = params.get("room") || "";
+      accessCodeInput.value = params.get("key") || "";
+    }
+
+    function setSessionDisabled(disabled) {
+      roomInput.disabled = disabled;
+      accessCodeInput.disabled = disabled;
+    }
+
+    function sendSignal(signal) {
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(signal));
+      }
+    }
+
+    function closePeerConnection(clearCandidates = true) {
+      const connection = pc;
+      pc = null;
+      if (clearCandidates) iceCandidatesQueue = [];
+      if (connection) {
+        connection.onicecandidate = null;
+        connection.onconnectionstatechange = null;
+        connection.oniceconnectionstatechange = null;
+        connection.ontrack = null;
+        connection.close();
+      }
+      remoteVideo.srcObject = null;
+      remoteVideo.muted = true;
+    }
+
     function createPC() {
-      pc = new RTCPeerConnection({
+      const connection = new RTCPeerConnection({
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
           { urls: "stun:stun1.l.google.com:19302" },
           { urls: "stun:stun.services.mozilla.com" }
         ]
       });
-      pc.onicecandidate = (e) => {
-        if (e.candidate && ws?.readyState === WebSocket.OPEN)
-          ws.send(JSON.stringify({ ice: e.candidate }));
+      pc = connection;
+
+      connection.onicecandidate = (event) => {
+        if (pc === connection && event.candidate) {
+          sendSignal({ ice: event.candidate });
+        }
       };
-      pc.onconnectionstatechange = () => {
-        const state = pc.connectionState;
-        status.textContent = state;
-        if (state === "connected" || state === "completed") {
+      connection.onconnectionstatechange = () => {
+        if (pc !== connection) return;
+
+        if (connection.connectionState === "connected") {
           remoteVideo.muted = false;
-        }
-        if (state === "failed" || state === "closed") {
-          cleanup();
-          status.textContent = "连接失败，请重新开始";
+          status.textContent = "连接建立";
+        } else if (connection.connectionState === "failed") {
+          closePeerConnection();
+          status.textContent = "连接失败，请停止后重试";
+        } else {
+          status.textContent = connection.connectionState;
         }
       };
-      pc.oniceconnectionstatechange = () => {
-        const state = pc.iceConnectionState;
-        if (state === "failed") status.textContent = "ICE 连接失败";
-        if (state === "disconnected") status.textContent = "ICE 已断开";
+      connection.oniceconnectionstatechange = () => {
+        if (pc !== connection) return;
+        if (connection.iceConnectionState === "disconnected") {
+          status.textContent = "ICE 暂时断开，正在恢复...";
+        }
       };
-      pc.ontrack = (e) => {
-        remoteVideo.srcObject = e.streams[0];
+      connection.ontrack = (event) => {
+        remoteVideo.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+        remoteVideo.play().catch(() => {});
         status.textContent = "收到视频流";
       };
+
+      return connection;
     }
 
-    async function processIceCandidates() {
-      if (!pc.remoteDescription) return;
+    async function processIceCandidates(connection) {
+      if (pc !== connection || !connection.remoteDescription) return;
       while (iceCandidatesQueue.length > 0) {
         const candidate = iceCandidatesQueue.shift();
         try {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          await connection.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (err) {
           console.warn("Failed to add ICE candidate:", err);
         }
       }
     }
 
-    function cleanup() {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close();
+    async function handleOffer(description) {
+      // 没有旧连接时保留可能先于 Offer 到达的 ICE；重新协商时丢弃旧候选。
+      closePeerConnection(pc !== null);
+      const connection = createPC();
+      try {
+        await connection.setRemoteDescription(new RTCSessionDescription(description));
+        await processIceCandidates(connection);
+        const answer = await connection.createAnswer();
+        await connection.setLocalDescription(answer);
+        if (pc === connection) sendSignal({ sdp: answer });
+        status.textContent = "已回复应答，正在建立连接...";
+      } catch (err) {
+        console.error("Failed to handle offer:", err);
+        if (pc === connection) closePeerConnection();
+        status.textContent = "处理连接请求失败";
       }
-      pc?.close();
-      pc = ws = null;
-      iceCandidatesQueue = [];
-      remoteVideo.srcObject = null;
-      remoteVideo.muted = true;
+    }
+
+    function cleanup(message = "已停止") {
+      const socket = ws;
+      ws = null;
+      if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000);
+
+      closePeerConnection();
+      setSessionDisabled(false);
       startBtn.style.display = "";
       stopBtn.style.display = "none";
-      status.textContent = "已停止";
+      status.textContent = message;
     }
 
     startBtn.onclick = () => {
-      createPC();
-      pc.addTransceiver("video", { direction: "recvonly" });
+      const session = readSession();
+      if (!session) return;
 
-      const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      ws = new WebSocket(proto + "//" + location.host + "/ws?role=recv");
+      saveSessionHash(session);
+      setSessionDisabled(true);
+      const socketUrl = new URL("/ws", location.href);
+      socketUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      socketUrl.searchParams.set("role", "recv");
+      socketUrl.searchParams.set("room", session.room);
+      socketUrl.searchParams.set("key", session.key);
+      const socket = new WebSocket(socketUrl);
+      ws = socket;
+      remoteVideo.muted = true;
 
-      ws.onopen = () => {
-        status.textContent = "已连接，等待发送端...";
+      socket.onopen = () => {
+        status.textContent = `已加入 ${session.room}，等待发送端...`;
+        sendSignal({ type: "receiver-ready" });
       };
 
-      ws.onmessage = async (e) => {
+      socket.onmessage = async (event) => {
         let data;
-        try { data = JSON.parse(e.data); } catch { return; }
+        try { data = JSON.parse(event.data); } catch { return; }
+
+        if (data.type === "peer-left" && data.role === "send") {
+          closePeerConnection();
+          status.textContent = "发送端已离线，继续等待...";
+          return;
+        }
+        if (data.type === "error") {
+          status.textContent = "信令错误：" + data.message;
+          return;
+        }
+
         if (data.sdp?.type === "offer") {
-          await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          ws.send(JSON.stringify({ sdp: answer }));
-          await processIceCandidates();
-          status.textContent = "已回复 answer";
+          await handleOffer(data.sdp);
         } else if (data.ice) {
           iceCandidatesQueue.push(data.ice);
-          await processIceCandidates();
+          if (pc) await processIceCandidates(pc);
         }
       };
 
-      ws.onerror = () => { status.textContent = "WebSocket 连接错误"; };
+      socket.onerror = () => { status.textContent = "WebSocket 连接错误"; };
+      socket.onclose = (event) => {
+        if (ws !== socket) return;
+        if (event.code === 4003) {
+          cleanup("访问码不正确，房间已由其他访问码创建");
+        } else if (event.code === 4010) {
+          cleanup("房间接收端已满，最多支持 8 个");
+        } else if (event.code === 1006) {
+          cleanup("无法加入房间，请检查房间信息和服务状态");
+        } else {
+          cleanup("信令连接已关闭");
+        }
+      };
       startBtn.style.display = "none";
       stopBtn.style.display = "";
       status.textContent = "正在连接...";
     };
 
-    stopBtn.onclick = cleanup;
+    stopBtn.onclick = () => cleanup();
+    window.addEventListener("hashchange", loadSessionHash);
+    loadSessionHash();
   </script>
 </body>
 
