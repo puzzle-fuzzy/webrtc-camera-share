@@ -2,14 +2,19 @@ use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
 use crate::signal::Role;
 
-pub const DEFAULT_MAX_RECEIVERS: usize = 8;
+pub enum OutboundMessage {
+    Text(String),
+    Ping,
+    Pong(Vec<u8>),
+    Close { code: u16, reason: String },
+}
 
-pub type PeerSender = UnboundedSender<String>;
+pub type PeerSender = Sender<OutboundMessage>;
 
 struct Peer {
     id: Uuid,
@@ -27,24 +32,30 @@ pub enum JoinResult {
     InvalidAccessCode,
     RoleOccupied,
     RoomFull,
+    ServerFull,
 }
 
 pub struct RoomRegistry {
     rooms: HashMap<String, Room>,
     max_receivers: usize,
+    max_rooms: usize,
 }
 
 impl Default for RoomRegistry {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_RECEIVERS)
+        Self::new(
+            crate::config::DEFAULT_MAX_RECEIVERS,
+            crate::config::DEFAULT_MAX_ROOMS,
+        )
     }
 }
 
 impl RoomRegistry {
-    pub fn new(max_receivers: usize) -> Self {
+    pub fn new(max_receivers: usize, max_rooms: usize) -> Self {
         Self {
             rooms: HashMap::new(),
             max_receivers,
+            max_rooms,
         }
     }
 
@@ -56,6 +67,10 @@ impl RoomRegistry {
         peer_id: Uuid,
         outbound: PeerSender,
     ) -> JoinResult {
+        if !self.rooms.contains_key(room_id) && self.rooms.len() >= self.max_rooms {
+            return JoinResult::ServerFull;
+        }
+
         let room = self
             .rooms
             .entry(room_id.to_owned())
@@ -184,7 +199,7 @@ mod tests {
     use super::*;
 
     fn peer() -> (Uuid, PeerSender) {
-        let (outbound, _messages) = mpsc::unbounded_channel();
+        let (outbound, _messages) = mpsc::channel(32);
         (Uuid::new_v4(), outbound)
     }
 
@@ -203,7 +218,7 @@ mod tests {
 
     #[test]
     fn keeps_one_sender_and_caps_receivers() {
-        let mut rooms = RoomRegistry::new(2);
+        let mut rooms = RoomRegistry::new(2, 2);
         let key = hash_access_code("123456");
         let wrong_key = hash_access_code("654321");
         let (sender_id, sender) = peer();
@@ -245,5 +260,22 @@ mod tests {
         rooms.leave("demo-room", Role::Recv, receiver_a_id);
         rooms.leave("demo-room", Role::Recv, receiver_b_id);
         assert_eq!(rooms.room_count(), 0);
+    }
+
+    #[test]
+    fn caps_the_number_of_rooms() {
+        let mut rooms = RoomRegistry::new(1, 1);
+        let key = hash_access_code("123456");
+        let (first_id, first) = peer();
+        let (second_id, second) = peer();
+
+        assert!(matches!(
+            rooms.join("first-room", key, Role::Send, first_id, first),
+            JoinResult::Joined { .. }
+        ));
+        assert!(matches!(
+            rooms.join("second-room", key, Role::Send, second_id, second),
+            JoinResult::ServerFull
+        ));
     }
 }

@@ -13,7 +13,9 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      '/config': 'http://127.0.0.1:5011',
       '/health': 'http://127.0.0.1:5011',
+      '/ready': 'http://127.0.0.1:5011',
       '/ws': {
         target: 'ws://127.0.0.1:5011',
         ws: true,

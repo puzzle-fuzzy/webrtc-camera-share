@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error, net::SocketAddr};
 
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -13,14 +13,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .init();
 
-    let config = Config::from_env()?;
-    let listener = TcpListener::bind(config.address).await?;
+    let Config {
+        address,
+        web_dist,
+        limits,
+        ice_servers,
+        trust_proxy,
+    } = Config::from_env()?;
+    let listener = TcpListener::bind(address).await?;
 
-    tracing::info!(address = %config.address, web_dist = %config.web_dist.display(), "server started");
+    tracing::info!(address = %address, web_dist = %web_dist.display(), "server started");
 
-    axum::serve(listener, build_app(AppState::default(), config.web_dist))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let app = build_app(AppState::new(limits, ice_servers, trust_proxy), web_dist);
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     Ok(())
 }

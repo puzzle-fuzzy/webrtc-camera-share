@@ -72,7 +72,6 @@ export function socketUrl(role: "send" | "recv", session: Session): URL {
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:"
   url.searchParams.set("role", role)
   url.searchParams.set("room", session.room)
-  url.searchParams.set("key", session.key)
   return url
 }
 

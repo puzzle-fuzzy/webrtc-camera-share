@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { sessionFromHash, sessionHash, validateSession } from "./session"
+import { sessionFromHash, sessionHash, socketUrl, validateSession } from "./session"
 
 describe("session", () => {
   test("normalizes valid values", () => {
@@ -30,5 +30,18 @@ describe("session", () => {
   test("round trips the URL fragment", () => {
     const session = { room: "demo-room", key: "123456" }
     expect(sessionFromHash(`#${sessionHash(session)}`)).toEqual(session)
+  })
+
+  test("keeps the access code out of the WebSocket URL", () => {
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: new URL("https://camera.example/send"),
+    })
+    const url = socketUrl("send", { room: "demo-room", key: "Secret123" })
+
+    expect(url.toString()).toBe(
+      "wss://camera.example/ws?role=send&room=demo-room",
+    )
+    expect(url.toString()).not.toContain("Secret123")
   })
 })

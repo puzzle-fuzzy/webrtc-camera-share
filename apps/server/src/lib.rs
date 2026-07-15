@@ -4,7 +4,7 @@ mod room;
 mod signal;
 
 pub use app::{AppState, build_app};
-pub use config::Config;
+pub use config::{Config, IceServerConfig, IceServerUrls, ResourceLimits};
 
 pub async fn shutdown_signal() {
     let ctrl_c = async {
