@@ -1,24 +1,31 @@
 {
   "name": "@voasx/p2p-video",
   "version": "1.0.0",
-  "description": "基于 WebRTC 和 Bun WebSocket 信令的一发多收摄像头共享演示",
+  "description": "基于 WebRTC、Rust 和 React 的一发多收摄像头共享应用",
+  "private": true,
   "type": "module",
+  "workspaces": [
+    "apps/web"
+  ],
   "scripts": {
-    "dev": "bun --watch run src/main.ts",
-    "start": "bun run src/main.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "bun test",
-    "verify": "bun run typecheck && bun test"
+    "dev": "concurrently --kill-others --names server,web \"cargo run --manifest-path apps/server/Cargo.toml\" \"bun run --cwd apps/web dev\"",
+    "dev:server": "cargo run --manifest-path apps/server/Cargo.toml",
+    "dev:web": "bun run --cwd apps/web dev",
+    "build": "bun run --cwd apps/web build && cargo build --manifest-path apps/server/Cargo.toml --release",
+    "typecheck": "bun run --cwd apps/web typecheck",
+    "lint": "bun run --cwd apps/web lint && cargo clippy --manifest-path apps/server/Cargo.toml --all-targets -- -D warnings",
+    "test": "bun run --cwd apps/web test && cargo test --manifest-path apps/server/Cargo.toml",
+    "verify": "bun run typecheck && bun run lint && bun run test && bun run --cwd apps/web build"
   },
   "keywords": [
     "webrtc",
     "websocket",
-    "bun"
+    "rust",
+    "react"
   ],
   "license": "MIT",
   "packageManager": "bun@1.4.0",
   "devDependencies": {
-    "@types/bun": "^1.3.14",
-    "typescript": "^7.0.2"
+    "concurrently": "^9.2.1"
   }
 }
