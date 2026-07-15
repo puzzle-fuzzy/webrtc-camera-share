@@ -88,6 +88,7 @@ export function ReceiverPage() {
             ref={receiver.videoRef}
             className="aspect-video w-full"
             autoPlay
+            controls
             playsInline
             aria-label="远端摄像头画面"
           />

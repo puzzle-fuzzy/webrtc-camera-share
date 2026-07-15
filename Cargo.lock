@@ -144,6 +144,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -248,6 +249,15 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -1015,9 +1025,12 @@ name = "webrtc-camera-share-server"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "base64",
  "futures-util",
+ "hmac",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "subtle",
  "tokio",

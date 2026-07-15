@@ -15,6 +15,7 @@ export default defineConfig({
     proxy: {
       '/config': 'http://127.0.0.1:5011',
       '/health': 'http://127.0.0.1:5011',
+      '/metrics': 'http://127.0.0.1:5011',
       '/ready': 'http://127.0.0.1:5011',
       '/ws': {
         target: 'ws://127.0.0.1:5011',

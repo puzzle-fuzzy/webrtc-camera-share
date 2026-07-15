@@ -78,8 +78,8 @@ export function socketUrl(role: "send" | "recv", session: Session): URL {
 export function randomSenderSession(): Session {
   const hash = sessionFromHash(location.hash)
   return {
-    room: hash.room ?? `demo-${randomHex(3)}`,
-    key: hash.key ?? randomAccessCode(),
+    room: hash.room ?? `demo-${randomHex(12)}`,
+    key: hash.key ?? randomHex(16),
   }
 }
 
@@ -89,10 +89,4 @@ function randomHex(byteLength: number): string {
   return [...bytes]
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("")
-}
-
-function randomAccessCode(): string {
-  const value = new Uint32Array(1)
-  crypto.getRandomValues(value)
-  return String(100_000 + (value[0] ?? 0) % 900_000)
 }

@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test"
 
-import { sessionFromHash, sessionHash, socketUrl, validateSession } from "./session"
+import {
+  randomSenderSession,
+  sessionFromHash,
+  sessionHash,
+  socketUrl,
+  validateSession,
+} from "./session"
 
 describe("session", () => {
   test("normalizes valid values", () => {
@@ -43,5 +49,17 @@ describe("session", () => {
       "wss://camera.example/ws?role=send&room=demo-room",
     )
     expect(url.toString()).not.toContain("Secret123")
+  })
+
+  test("generates high-entropy defaults", () => {
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: new URL("https://camera.example/send"),
+    })
+
+    const session = randomSenderSession()
+
+    expect(session.room).toMatch(/^demo-[a-f0-9]{24}$/)
+    expect(session.key).toMatch(/^[a-f0-9]{32}$/)
   })
 })

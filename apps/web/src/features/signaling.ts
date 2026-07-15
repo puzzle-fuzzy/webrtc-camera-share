@@ -7,6 +7,7 @@ const fallbackRtcConfiguration = {
 } satisfies RTCConfiguration
 
 const FALLBACK_MAX_RECEIVERS = 8
+const RUNTIME_CONFIG_TIMEOUT_MS = 5_000
 export const MAX_PENDING_ICE_CANDIDATES = 128
 
 export type RuntimeConfiguration = {
@@ -14,15 +15,28 @@ export type RuntimeConfiguration = {
   maxReceivers: number
 }
 
-export function loadRuntimeConfiguration(): Promise<RuntimeConfiguration> {
-  return fetchRuntimeConfiguration()
+export function loadRuntimeConfiguration(
+  signal?: AbortSignal,
+  timeoutMs = RUNTIME_CONFIG_TIMEOUT_MS,
+): Promise<RuntimeConfiguration> {
+  return fetchRuntimeConfiguration(signal, timeoutMs)
 }
 
-async function fetchRuntimeConfiguration(): Promise<RuntimeConfiguration> {
+async function fetchRuntimeConfiguration(
+  externalSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<RuntimeConfiguration> {
+  const controller = new AbortController()
+  const abort = () => controller.abort(externalSignal?.reason)
+  if (externalSignal?.aborted) abort()
+  else externalSignal?.addEventListener("abort", abort, { once: true })
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
   try {
     const response = await fetch("/config", {
       cache: "no-store",
       headers: { accept: "application/json" },
+      signal: controller.signal,
     })
     if (!response.ok) throw new Error(`配置接口返回 ${response.status}`)
 
@@ -36,9 +50,10 @@ async function fetchRuntimeConfiguration(): Promise<RuntimeConfiguration> {
     if (
       !iceServers ||
       iceServers.some((server) => server === undefined) ||
-      !Number.isSafeInteger(maxReceivers) ||
       typeof maxReceivers !== "number" ||
-      maxReceivers < 1
+      !Number.isSafeInteger(maxReceivers) ||
+      maxReceivers < 1 ||
+      maxReceivers > FALLBACK_MAX_RECEIVERS
     ) {
       throw new Error("配置字段无效")
     }
@@ -47,12 +62,14 @@ async function fetchRuntimeConfiguration(): Promise<RuntimeConfiguration> {
       rtcConfiguration: { iceServers: iceServers as RTCIceServer[] },
       maxReceivers,
     }
-  } catch (error) {
-    console.warn("Failed to load runtime WebRTC configuration", error)
+  } catch {
     return {
       rtcConfiguration: fallbackRtcConfiguration,
       maxReceivers: FALLBACK_MAX_RECEIVERS,
     }
+  } finally {
+    clearTimeout(timeout)
+    externalSignal?.removeEventListener("abort", abort)
   }
 }
 
@@ -98,6 +115,8 @@ type ReceiverReadySignal = {
 
 type AuthenticatedSignal = {
   type: "authenticated"
+  iceServers: RTCIceServer[]
+  maxReceivers: number
 }
 
 type PeerLeftSignal =
@@ -168,7 +187,21 @@ export function parseServerSignal(message: unknown): ServerSignal | undefined {
     return { type: "receiver-ready", peerId: value.peerId }
   }
   if (value.type === "authenticated") {
-    return { type: "authenticated" }
+    const iceServers = parseIceServers(value.iceServers)
+    if (
+      !iceServers ||
+      typeof value.maxReceivers !== "number" ||
+      !Number.isSafeInteger(value.maxReceivers) ||
+      value.maxReceivers < 1 ||
+      value.maxReceivers > FALLBACK_MAX_RECEIVERS
+    ) {
+      return
+    }
+    return {
+      type: "authenticated",
+      iceServers,
+      maxReceivers: value.maxReceivers,
+    }
   }
   if (value.type === "peer-left" && value.role === "send") {
     return { type: "peer-left", role: "send" }
@@ -196,4 +229,11 @@ export function parseServerSignal(message: unknown): ServerSignal | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function parseIceServers(value: unknown): RTCIceServer[] | undefined {
+  if (!Array.isArray(value)) return
+  const iceServers = value.map(parseIceServer)
+  if (iceServers.some((server) => server === undefined)) return
+  return iceServers as RTCIceServer[]
 }

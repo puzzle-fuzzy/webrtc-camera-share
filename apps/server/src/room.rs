@@ -1,11 +1,20 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
 
-use crate::signal::Role;
+use crate::{metrics::ServerMetrics, signal::Role};
+
+const OUTBOUND_QUEUE_CAPACITY: usize = 32;
+const OUTBOUND_BYTE_CAPACITY: usize = 256 * 1024;
 
 pub enum OutboundMessage {
     Text(String),
@@ -14,7 +23,97 @@ pub enum OutboundMessage {
     Close { code: u16, reason: String },
 }
 
-pub type PeerSender = Sender<OutboundMessage>;
+impl OutboundMessage {
+    fn estimated_size(&self) -> usize {
+        match self {
+            Self::Text(message) => message.len(),
+            Self::Ping => 1,
+            Self::Pong(payload) => payload.len().max(1),
+            Self::Close { reason, .. } => reason.len() + 2,
+        }
+    }
+}
+
+pub struct QueuedOutbound {
+    message: Option<OutboundMessage>,
+    _permit: OwnedSemaphorePermit,
+    metrics: Arc<ServerMetrics>,
+    bytes: usize,
+}
+
+impl QueuedOutbound {
+    pub fn take_message(&mut self) -> OutboundMessage {
+        self.message.take().expect("queued outbound message exists")
+    }
+}
+
+impl Drop for QueuedOutbound {
+    fn drop(&mut self) {
+        self.metrics.remove_queued_signal_bytes(self.bytes);
+    }
+}
+
+#[derive(Clone)]
+pub struct PeerSender {
+    sender: mpsc::Sender<QueuedOutbound>,
+    byte_budget: Arc<Semaphore>,
+    disconnected: Arc<AtomicBool>,
+    disconnect_notification: Arc<Notify>,
+    metrics: Arc<ServerMetrics>,
+}
+
+impl PeerSender {
+    pub fn channel(metrics: Arc<ServerMetrics>) -> (Self, mpsc::Receiver<QueuedOutbound>) {
+        let (sender, receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+        (
+            Self {
+                sender,
+                byte_budget: Arc::new(Semaphore::new(OUTBOUND_BYTE_CAPACITY)),
+                disconnected: Arc::new(AtomicBool::new(false)),
+                disconnect_notification: Arc::new(Notify::new()),
+                metrics,
+            },
+            receiver,
+        )
+    }
+
+    pub fn try_send(&self, message: OutboundMessage) -> bool {
+        if self.disconnected.load(Ordering::Acquire) {
+            return false;
+        }
+
+        let bytes = message.estimated_size().max(1);
+        let Ok(bytes_u32) = u32::try_from(bytes) else {
+            return false;
+        };
+        let Ok(permit) = self.byte_budget.clone().try_acquire_many_owned(bytes_u32) else {
+            return false;
+        };
+        self.metrics.add_queued_signal_bytes(bytes);
+        self.sender
+            .try_send(QueuedOutbound {
+                message: Some(message),
+                _permit: permit,
+                metrics: self.metrics.clone(),
+                bytes,
+            })
+            .is_ok()
+    }
+
+    pub fn disconnect(&self) {
+        if !self.disconnected.swap(true, Ordering::AcqRel) {
+            self.disconnect_notification.notify_one();
+        }
+    }
+
+    pub async fn cancelled(&self) {
+        let notified = self.disconnect_notification.notified();
+        if self.disconnected.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
 
 struct Peer {
     id: Uuid,
@@ -194,12 +293,10 @@ pub fn hash_access_code(value: &str) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::mpsc;
-
     use super::*;
 
     fn peer() -> (Uuid, PeerSender) {
-        let (outbound, _messages) = mpsc::channel(32);
+        let (outbound, _messages) = PeerSender::channel(Arc::new(ServerMetrics::default()));
         (Uuid::new_v4(), outbound)
     }
 
@@ -277,5 +374,21 @@ mod tests {
             rooms.join("second-room", key, Role::Send, second_id, second),
             JoinResult::ServerFull
         ));
+    }
+
+    #[test]
+    fn caps_each_peer_queue_by_bytes() {
+        let metrics = Arc::new(ServerMetrics::default());
+        let (peer, receiver) = PeerSender::channel(metrics.clone());
+        let payload = "x".repeat(64 * 1024);
+
+        for _ in 0..4 {
+            assert!(peer.try_send(OutboundMessage::Text(payload.clone())));
+        }
+        assert!(!peer.try_send(OutboundMessage::Text(payload)));
+        assert_eq!(metrics.queued_signal_bytes(), OUTBOUND_BYTE_CAPACITY);
+
+        drop(receiver);
+        assert_eq!(metrics.queued_signal_bytes(), 0);
     }
 }

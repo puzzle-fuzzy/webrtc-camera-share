@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+const MAX_SDP_BYTES: usize = 64 * 1024;
+const MAX_ICE_CANDIDATE_BYTES: usize = 4 * 1024;
+const MAX_SDP_MID_BYTES: usize = 64;
+const MAX_USERNAME_FRAGMENT_BYTES: usize = 256;
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -73,7 +78,7 @@ fn parse_sdp(
     let description = sdp
         .get("sdp")
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty());
+        .filter(|value| !value.is_empty() && value.len() <= MAX_SDP_BYTES);
 
     if sdp.get("type").and_then(Value::as_str) != Some(expected_type) || description.is_none() {
         return Err(format!("{role} 角色只能发送有效的 {expected_type} SDP"));
@@ -105,13 +110,19 @@ fn parse_ice(
     let candidate = ice
         .get("candidate")
         .and_then(Value::as_str)
+        .filter(|candidate| candidate.len() <= MAX_ICE_CANDIDATE_BYTES)
         .ok_or_else(|| "ICE candidate 格式无效".to_owned())?;
 
     let mut normalized_ice =
         Map::from_iter([("candidate".to_owned(), Value::String(candidate.to_owned()))]);
-    copy_optional_string_or_null(ice, &mut normalized_ice, "sdpMid");
-    copy_optional_number_or_null(ice, &mut normalized_ice, "sdpMLineIndex");
-    copy_optional_string_or_null(ice, &mut normalized_ice, "usernameFragment");
+    copy_optional_string_or_null(ice, &mut normalized_ice, "sdpMid", MAX_SDP_MID_BYTES);
+    copy_optional_mline_index(ice, &mut normalized_ice, "sdpMLineIndex");
+    copy_optional_string_or_null(
+        ice,
+        &mut normalized_ice,
+        "usernameFragment",
+        MAX_USERNAME_FRAGMENT_BYTES,
+    );
 
     let target_peer_id = target_peer_id(role, object)?;
     let mut normalized = Value::Object(Map::from_iter([(
@@ -149,24 +160,26 @@ fn copy_optional_string_or_null(
     source: &Map<String, Value>,
     target: &mut Map<String, Value>,
     key: &str,
+    maximum_bytes: usize,
 ) {
-    if let Some(value) = source
-        .get(key)
-        .filter(|value| value.is_string() || value.is_null())
-    {
+    if let Some(value) = source.get(key).filter(|value| {
+        value.is_null()
+            || value
+                .as_str()
+                .is_some_and(|value| value.len() <= maximum_bytes)
+    }) {
         target.insert(key.to_owned(), value.clone());
     }
 }
 
-fn copy_optional_number_or_null(
+fn copy_optional_mline_index(
     source: &Map<String, Value>,
     target: &mut Map<String, Value>,
     key: &str,
 ) {
-    if let Some(value) = source
-        .get(key)
-        .filter(|value| value.is_number() || value.is_null())
-    {
+    if let Some(value) = source.get(key).filter(|value| {
+        value.is_null() || value.as_u64().is_some_and(|value| value <= u16::MAX.into())
+    }) {
         target.insert(key.to_owned(), value.clone());
     }
 }
@@ -230,5 +243,26 @@ mod tests {
         let ready = parse_client_signal(Role::Recv, r#"{"type":"receiver-ready"}"#)
             .expect("receiver ready");
         assert_eq!(ready.value["type"], "receiver-ready");
+    }
+
+    #[test]
+    fn rejects_oversized_sdp_and_ice_fields() {
+        let oversized_sdp = "x".repeat(MAX_SDP_BYTES + 1);
+        assert!(
+            parse_client_signal(
+                Role::Recv,
+                &json!({ "sdp": { "type": "answer", "sdp": oversized_sdp } }).to_string(),
+            )
+            .is_err()
+        );
+
+        let oversized_candidate = "x".repeat(MAX_ICE_CANDIDATE_BYTES + 1);
+        assert!(
+            parse_client_signal(
+                Role::Recv,
+                &json!({ "ice": { "candidate": oversized_candidate } }).to_string(),
+            )
+            .is_err()
+        );
     }
 }

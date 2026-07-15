@@ -3,7 +3,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use axum::{
@@ -24,17 +24,16 @@ use axum::{
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::{
-    sync::mpsc,
-    time::{Instant, MissedTickBehavior, interval_at, timeout},
-};
+use tokio::time::{Instant, MissedTickBehavior, interval_at, timeout};
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::{
-    config::{IceServerConfig, ResourceLimits, default_ice_servers},
+    config::{IceServerConfig, ResourceLimits, TurnConfig, default_ice_servers},
+    metrics::ServerMetrics,
     room::{
-        JoinResult, OutboundMessage, PeerSender, RoomRegistry, hash_access_code,
+        JoinResult, OutboundMessage, PeerSender, QueuedOutbound, RoomRegistry, hash_access_code,
         is_valid_access_code, normalize_room_id,
     },
     signal::{Role, ValidatedSignal, parse_client_signal},
@@ -44,17 +43,29 @@ const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
-const OUTBOUND_QUEUE_CAPACITY: usize = 32;
 const SIGNAL_WINDOW: Duration = Duration::from_secs(1);
 const MAX_SIGNAL_MESSAGES_PER_WINDOW: usize = 64;
-const MAX_SIGNAL_BYTES_PER_WINDOW: usize = 512 * 1024;
-const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 * 1024;
+const MAX_SIGNAL_BYTES_PER_WINDOW: usize = 256 * 1024;
+const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 96 * 1024;
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
+const AUTH_BLOCK_DURATION: Duration = Duration::from_secs(15 * 60);
+const AUTH_ENTRY_TTL: Duration = Duration::from_secs(30 * 60);
+const MAX_AUTH_FAILURES: u32 = 8;
+const MAX_AUTH_ENTRIES: usize = 4_096;
+const TURN_CREDENTIAL_WINDOW: Duration = Duration::from_secs(10 * 60);
+const TURN_CREDENTIAL_ENTRY_TTL: Duration = Duration::from_secs(30 * 60);
+const MAX_TURN_CREDENTIALS_PER_WINDOW: u32 = 64;
+const MAX_TURN_CREDENTIAL_ENTRIES: usize = 4_096;
 
 #[derive(Clone)]
 pub struct AppState {
     rooms: Arc<Mutex<RoomRegistry>>,
     connections: Arc<ConnectionLimiter>,
     ice_servers: Arc<Vec<IceServerConfig>>,
+    turn: Option<Arc<TurnConfig>>,
+    authentication: Arc<AuthenticationLimiter>,
+    turn_credentials: Arc<TurnCredentialLimiter>,
+    metrics: Arc<ServerMetrics>,
     max_receivers: usize,
     trust_proxy: bool,
 }
@@ -63,6 +74,7 @@ impl AppState {
     pub fn new(
         limits: ResourceLimits,
         ice_servers: Vec<IceServerConfig>,
+        turn: Option<TurnConfig>,
         trust_proxy: bool,
     ) -> Self {
         Self {
@@ -75,15 +87,42 @@ impl AppState {
                 limits.max_connections_per_ip,
             )),
             ice_servers: Arc::new(ice_servers),
+            turn: turn.map(Arc::new),
+            authentication: Arc::new(AuthenticationLimiter::new()),
+            turn_credentials: Arc::new(TurnCredentialLimiter::new()),
+            metrics: Arc::new(ServerMetrics::default()),
             max_receivers: limits.max_receivers,
             trust_proxy,
         }
+    }
+
+    fn disconnect_overloaded_peer(&self, peer: &PeerSender) {
+        self.metrics.record_outbound_overload();
+        peer.disconnect();
+    }
+
+    fn authenticated_ice_servers(&self, peer_id: Uuid) -> Vec<IceServerConfig> {
+        let mut ice_servers = self.ice_servers.as_ref().clone();
+        if let Some(turn) = &self.turn {
+            match turn.ephemeral_server(SystemTime::now(), &peer_id.to_string()) {
+                Ok(server) => ice_servers.push(server),
+                Err(error) => {
+                    tracing::error!(%error, "failed to generate ephemeral TURN credentials");
+                }
+            }
+        }
+        ice_servers
     }
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::new(ResourceLimits::default(), default_ice_servers(), false)
+        Self::new(
+            ResourceLimits::default(),
+            default_ice_servers(),
+            None,
+            false,
+        )
     }
 }
 
@@ -128,6 +167,22 @@ struct ReadinessResponse {
     web: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetricsResponse {
+    rooms: usize,
+    peers: usize,
+    connections: usize,
+    queued_signal_bytes: usize,
+    routed_signals: u64,
+    outbound_overloads: u64,
+    rate_limited_connections: u64,
+    connection_rejections: u64,
+    authentication_failures: u64,
+    authentication_blocks: u64,
+    turn_credential_rejections: u64,
+}
+
 pub fn build_app(state: AppState, web_dist: PathBuf) -> Router {
     let index_path = web_dist.join("index.html");
     let http_state = HttpState {
@@ -138,10 +193,12 @@ pub fn build_app(state: AppState, web_dist: PathBuf) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
         .route("/config", get(runtime_config))
         .route("/ws", get(websocket))
         .nest_service("/assets", ServeDir::new(web_dist.join("assets")))
         .fallback_service(ServeFile::new(index_path))
+        .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(security_headers))
         .with_state(http_state)
 }
@@ -173,6 +230,23 @@ async fn runtime_config(State(state): State<HttpState>) -> Json<RuntimeConfigRes
     })
 }
 
+async fn metrics(State(state): State<HttpState>) -> Json<MetricsResponse> {
+    let rooms = state.app.rooms.lock().expect("room registry lock poisoned");
+    Json(MetricsResponse {
+        rooms: rooms.room_count(),
+        peers: rooms.peer_count(),
+        connections: state.app.connections.active_count(),
+        queued_signal_bytes: state.app.metrics.queued_signal_bytes(),
+        routed_signals: state.app.metrics.routed_signals(),
+        outbound_overloads: state.app.metrics.outbound_overloads(),
+        rate_limited_connections: state.app.metrics.rate_limited_connections(),
+        connection_rejections: state.app.metrics.connection_rejections(),
+        authentication_failures: state.app.metrics.authentication_failures(),
+        authentication_blocks: state.app.metrics.authentication_blocks(),
+        turn_credential_rejections: state.app.metrics.turn_credential_rejections(),
+    })
+}
+
 async fn websocket(
     State(state): State<HttpState>,
     Query(params): Query<ConnectParams>,
@@ -185,6 +259,7 @@ async fn websocket(
     };
     let ip = client_ip(&headers, address.ip(), state.app.trust_proxy);
     let Some(lease) = state.app.connections.acquire(ip) else {
+        state.app.metrics.record_connection_rejection();
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
 
@@ -203,13 +278,14 @@ async fn handle_socket(
     _lease: ConnectionLease,
 ) {
     let peer_id = Uuid::new_v4();
-    let (outbound, outbound_messages) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+    let (outbound, outbound_messages) = PeerSender::channel(state.metrics.clone());
     let Some(receiver_ids) = authenticate_and_join(
         &mut socket,
         &state,
         &room_id,
         role,
         peer_id,
+        ip,
         outbound.clone(),
     )
     .await
@@ -217,10 +293,20 @@ async fn handle_socket(
         return;
     };
 
+    if state.turn.is_some() && !state.turn_credentials.allow(ip) {
+        state.metrics.record_turn_credential_rejection();
+        close_socket(&mut socket, 4030, "TURN credential rate exceeded").await;
+        disconnect_peer(&state, &room_id, role, peer_id);
+        return;
+    }
+
+    let authenticated = json!({
+        "type": "authenticated",
+        "iceServers": state.authenticated_ice_servers(peer_id),
+        "maxReceivers": state.max_receivers,
+    });
     if socket
-        .send(Message::Text(
-            json!({ "type": "authenticated" }).to_string().into(),
-        ))
+        .send(Message::Text(authenticated.to_string().into()))
         .await
         .is_err()
     {
@@ -253,6 +339,7 @@ async fn handle_socket(
 
     let writer_finished = loop {
         tokio::select! {
+            _ = outbound.cancelled() => break false,
             writer_result = &mut writer => {
                 if let Err(error) = writer_result {
                     tracing::warn!(%room_id, %peer_id, %error, "websocket writer task failed");
@@ -278,14 +365,7 @@ async fn handle_socket(
                 match incoming {
                     Some(Ok(Message::Text(message))) => {
                         last_seen = Instant::now();
-                        if !signal_budget.allow(message.len()) {
-                            let _ = send_outbound(
-                                &outbound,
-                                OutboundMessage::Close {
-                                    code: 4029,
-                                    reason: "signal rate exceeded".to_owned(),
-                                },
-                            );
+                        if rate_limit_exceeded(&state, &outbound, &mut signal_budget, message.len()) {
                             break false;
                         }
                         handle_signal(
@@ -298,7 +378,11 @@ async fn handle_socket(
                             message.as_str(),
                         );
                     }
-                    Some(Ok(Message::Binary(_))) => {
+                    Some(Ok(Message::Binary(payload))) => {
+                        last_seen = Instant::now();
+                        if rate_limit_exceeded(&state, &outbound, &mut signal_budget, payload.len()) {
+                            break false;
+                        }
                         send_error(
                             &outbound,
                             "INVALID_SIGNAL",
@@ -308,12 +392,18 @@ async fn handle_socket(
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         last_seen = Instant::now();
+                        if rate_limit_exceeded(&state, &outbound, &mut signal_budget, payload.len()) {
+                            break false;
+                        }
                         if !send_outbound(&outbound, OutboundMessage::Pong(payload.to_vec())) {
                             break false;
                         }
                     }
-                    Some(Ok(Message::Pong(_))) => {
+                    Some(Ok(Message::Pong(payload))) => {
                         last_seen = Instant::now();
+                        if rate_limit_exceeded(&state, &outbound, &mut signal_budget, payload.len()) {
+                            break false;
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None => break false,
                     Some(Err(error)) => {
@@ -340,8 +430,15 @@ async fn authenticate_and_join(
     room_id: &str,
     role: Role,
     peer_id: Uuid,
+    ip: IpAddr,
     outbound: PeerSender,
 ) -> Option<Vec<Uuid>> {
+    if state.authentication.is_blocked(ip, room_id) {
+        state.metrics.record_authentication_block();
+        close_socket(socket, 4028, "too many authentication failures").await;
+        return None;
+    }
+
     let message = match timeout(AUTHENTICATION_TIMEOUT, socket.next()).await {
         Ok(Some(Ok(Message::Text(message)))) => message,
         Ok(Some(Ok(_))) => {
@@ -362,6 +459,8 @@ async fn authenticate_and_join(
             authentication
         }
         _ => {
+            state.authentication.record_failure(ip, room_id);
+            state.metrics.record_authentication_failure();
             close_socket(socket, 4000, "invalid authentication message").await;
             return None;
         }
@@ -379,16 +478,23 @@ async fn authenticate_and_join(
             outbound,
         );
     match join_result {
-        JoinResult::Joined { receiver_ids } => Some(receiver_ids),
+        JoinResult::Joined { receiver_ids } => {
+            state.authentication.record_success(ip, room_id);
+            Some(receiver_ids)
+        }
         JoinResult::InvalidAccessCode => {
+            state.authentication.record_failure(ip, room_id);
+            state.metrics.record_authentication_failure();
             close_socket(socket, 4003, "invalid access code").await;
             None
         }
         JoinResult::RoleOccupied => {
+            state.authentication.record_success(ip, room_id);
             close_socket(socket, 4009, "role occupied").await;
             None
         }
         JoinResult::RoomFull => {
+            state.authentication.record_success(ip, room_id);
             close_socket(socket, 4010, "room full").await;
             None
         }
@@ -401,9 +507,10 @@ async fn authenticate_and_join(
 
 async fn write_socket(
     mut socket: SplitSink<WebSocket, Message>,
-    mut outbound: mpsc::Receiver<OutboundMessage>,
+    mut outbound: tokio::sync::mpsc::Receiver<QueuedOutbound>,
 ) {
-    while let Some(message) = outbound.recv().await {
+    while let Some(mut queued) = outbound.recv().await {
+        let message = queued.take_message();
         let should_close = matches!(message, OutboundMessage::Close { .. });
         let message = match message {
             OutboundMessage::Text(message) => Message::Text(message.into()),
@@ -473,12 +580,15 @@ fn route_sender_signal(
 
     if let Some(receiver) = receiver {
         if !send_json(&receiver, signal.value) {
+            state.disconnect_overloaded_peer(&receiver);
             send_error(
                 outbound,
                 "PEER_OVERLOADED",
                 "接收端处理信令过慢",
                 Some(peer_id),
             );
+        } else {
+            state.metrics.record_routed_signal();
         }
     } else {
         send_error(outbound, "PEER_NOT_FOUND", "接收端已离线", Some(peer_id));
@@ -505,7 +615,10 @@ fn route_receiver_signal(
         object.insert("peerId".to_owned(), Value::String(peer_id.to_string()));
     }
     if !send_json(&sender, signal.value) {
+        state.disconnect_overloaded_peer(&sender);
         send_error(outbound, "PEER_OVERLOADED", "发送端处理信令过慢", None);
+    } else {
+        state.metrics.record_routed_signal();
     }
 }
 
@@ -520,7 +633,9 @@ fn disconnect_peer(state: &AppState, room_id: &str, role: Role, peer_id: Uuid) {
         Role::Recv => json!({ "type": "peer-left", "role": "recv", "peerId": peer_id }),
     };
     for peer in notify {
-        let _ = send_json(&peer, left_message.clone());
+        if !send_json(&peer, left_message.clone()) {
+            state.disconnect_overloaded_peer(&peer);
+        }
     }
 }
 
@@ -541,7 +656,27 @@ fn send_json(outbound: &PeerSender, value: Value) -> bool {
 }
 
 fn send_outbound(outbound: &PeerSender, message: OutboundMessage) -> bool {
-    outbound.try_send(message).is_ok()
+    outbound.try_send(message)
+}
+
+fn rate_limit_exceeded(
+    state: &AppState,
+    outbound: &PeerSender,
+    budget: &mut SignalBudget,
+    bytes: usize,
+) -> bool {
+    if budget.allow(bytes) {
+        return false;
+    }
+    state.metrics.record_rate_limited_connection();
+    let _ = send_outbound(
+        outbound,
+        OutboundMessage::Close {
+            code: 4029,
+            reason: "signal rate exceeded".to_owned(),
+        },
+    );
+    true
 }
 
 async fn close_socket(socket: &mut WebSocket, code: u16, reason: &'static str) {
@@ -574,6 +709,7 @@ fn client_ip(headers: &HeaderMap, direct_ip: IpAddr, trust_proxy: bool) -> IpAdd
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
     let immutable_asset = request.uri().path().starts_with("/assets/");
+    let request_id = Uuid::new_v4().to_string();
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -603,6 +739,10 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
         HeaderName::from_static("x-frame-options"),
         HeaderValue::from_static("DENY"),
     );
+    headers.insert(
+        HeaderName::from_static("x-request-id"),
+        HeaderValue::from_str(&request_id).expect("UUID is a valid header value"),
+    );
     response
 }
 
@@ -630,6 +770,187 @@ impl SignalBudget {
         self.messages = self.messages.saturating_add(1);
         self.bytes = self.bytes.saturating_add(bytes);
         self.messages <= MAX_SIGNAL_MESSAGES_PER_WINDOW && self.bytes <= MAX_SIGNAL_BYTES_PER_WINDOW
+    }
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct AuthenticationKey {
+    ip: IpAddr,
+    room_id: String,
+}
+
+struct AuthenticationEntry {
+    failures: u32,
+    window_started: Instant,
+    blocked_until: Option<Instant>,
+    last_seen: Instant,
+}
+
+struct AuthenticationState {
+    entries: HashMap<AuthenticationKey, AuthenticationEntry>,
+    last_pruned: Instant,
+}
+
+struct AuthenticationLimiter {
+    state: Mutex<AuthenticationState>,
+}
+
+impl AuthenticationLimiter {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(AuthenticationState {
+                entries: HashMap::new(),
+                last_pruned: Instant::now(),
+            }),
+        }
+    }
+
+    fn is_blocked(&self, ip: IpAddr, room_id: &str) -> bool {
+        let now = Instant::now();
+        let mut state = self
+            .state
+            .lock()
+            .expect("authentication limiter lock poisoned");
+        Self::prune_if_due(&mut state, now);
+        let key = AuthenticationKey {
+            ip,
+            room_id: room_id.to_owned(),
+        };
+        let Some(entry) = state.entries.get_mut(&key) else {
+            return false;
+        };
+        entry.last_seen = now;
+        if entry
+            .blocked_until
+            .is_some_and(|blocked_until| now < blocked_until)
+        {
+            return true;
+        }
+        if now.duration_since(entry.window_started) >= AUTH_FAILURE_WINDOW {
+            entry.failures = 0;
+            entry.window_started = now;
+            entry.blocked_until = None;
+        }
+        false
+    }
+
+    fn record_failure(&self, ip: IpAddr, room_id: &str) {
+        let now = Instant::now();
+        let mut state = self
+            .state
+            .lock()
+            .expect("authentication limiter lock poisoned");
+        Self::prune_if_due(&mut state, now);
+        let key = AuthenticationKey {
+            ip,
+            room_id: room_id.to_owned(),
+        };
+        if !state.entries.contains_key(&key)
+            && state.entries.len() >= MAX_AUTH_ENTRIES
+            && let Some(evicted) = state.entries.keys().next().cloned()
+        {
+            state.entries.remove(&evicted);
+        }
+        let entry = state.entries.entry(key).or_insert(AuthenticationEntry {
+            failures: 0,
+            window_started: now,
+            blocked_until: None,
+            last_seen: now,
+        });
+        if now.duration_since(entry.window_started) >= AUTH_FAILURE_WINDOW {
+            entry.failures = 0;
+            entry.window_started = now;
+        }
+        entry.failures = entry.failures.saturating_add(1);
+        entry.last_seen = now;
+        if entry.failures >= MAX_AUTH_FAILURES {
+            entry.blocked_until = now.checked_add(AUTH_BLOCK_DURATION);
+        }
+    }
+
+    fn record_success(&self, ip: IpAddr, room_id: &str) {
+        self.state
+            .lock()
+            .expect("authentication limiter lock poisoned")
+            .entries
+            .remove(&AuthenticationKey {
+                ip,
+                room_id: room_id.to_owned(),
+            });
+    }
+
+    fn prune_if_due(state: &mut AuthenticationState, now: Instant) {
+        if now.duration_since(state.last_pruned) < Duration::from_secs(60) {
+            return;
+        }
+        state.entries.retain(|_, entry| {
+            now.checked_duration_since(entry.last_seen)
+                .is_some_and(|age| age < AUTH_ENTRY_TTL)
+        });
+        state.last_pruned = now;
+    }
+}
+
+struct TurnCredentialEntry {
+    issued: u32,
+    window_started: Instant,
+    last_seen: Instant,
+}
+
+struct TurnCredentialState {
+    entries: HashMap<IpAddr, TurnCredentialEntry>,
+    last_pruned: Instant,
+}
+
+struct TurnCredentialLimiter {
+    state: Mutex<TurnCredentialState>,
+}
+
+impl TurnCredentialLimiter {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(TurnCredentialState {
+                entries: HashMap::new(),
+                last_pruned: Instant::now(),
+            }),
+        }
+    }
+
+    fn allow(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut state = self
+            .state
+            .lock()
+            .expect("TURN credential limiter lock poisoned");
+        if now.duration_since(state.last_pruned) >= Duration::from_secs(60) {
+            state.entries.retain(|_, entry| {
+                now.checked_duration_since(entry.last_seen)
+                    .is_some_and(|age| age < TURN_CREDENTIAL_ENTRY_TTL)
+            });
+            state.last_pruned = now;
+        }
+        if !state.entries.contains_key(&ip)
+            && state.entries.len() >= MAX_TURN_CREDENTIAL_ENTRIES
+            && let Some(evicted) = state.entries.keys().next().copied()
+        {
+            state.entries.remove(&evicted);
+        }
+
+        let entry = state.entries.entry(ip).or_insert(TurnCredentialEntry {
+            issued: 0,
+            window_started: now,
+            last_seen: now,
+        });
+        if now.duration_since(entry.window_started) >= TURN_CREDENTIAL_WINDOW {
+            entry.issued = 0;
+            entry.window_started = now;
+        }
+        entry.last_seen = now;
+        if entry.issued >= MAX_TURN_CREDENTIALS_PER_WINDOW {
+            return false;
+        }
+        entry.issued += 1;
+        true
     }
 }
 
@@ -767,5 +1088,30 @@ mod tests {
             assert!(budget.allow(1));
         }
         assert!(!budget.allow(1));
+    }
+
+    #[test]
+    fn blocks_repeated_authentication_failures_and_clears_successes() {
+        let limiter = AuthenticationLimiter::new();
+        let ip = "127.0.0.1".parse().expect("IP");
+        for _ in 0..MAX_AUTH_FAILURES {
+            assert!(!limiter.is_blocked(ip, "private-room"));
+            limiter.record_failure(ip, "private-room");
+        }
+        assert!(limiter.is_blocked(ip, "private-room"));
+
+        limiter.record_success(ip, "private-room");
+        assert!(!limiter.is_blocked(ip, "private-room"));
+    }
+
+    #[test]
+    fn limits_turn_credential_issuance_per_ip() {
+        let limiter = TurnCredentialLimiter::new();
+        let ip = "127.0.0.1".parse().expect("IP");
+        for _ in 0..MAX_TURN_CREDENTIALS_PER_WINDOW {
+            assert!(limiter.allow(ip));
+        }
+        assert!(!limiter.allow(ip));
+        assert!(limiter.allow("127.0.0.2".parse().expect("IP")));
     }
 }

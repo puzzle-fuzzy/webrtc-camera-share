@@ -29,7 +29,7 @@ impl TestServer {
             .expect("bind test server");
         let address = listener.local_addr().expect("test server address");
         let app = build_app(
-            AppState::new(limits, Vec::new(), false),
+            AppState::new(limits, Vec::new(), None, false),
             PathBuf::from("missing-test-dist"),
         );
         let task = tokio::spawn(async move {
@@ -58,7 +58,10 @@ async fn authenticate(socket: &mut ClientSocket, key: &str) {
         ))
         .await
         .expect("send authentication");
-    assert_eq!(next_json(socket).await["type"], "authenticated");
+    let authenticated = next_json(socket).await;
+    assert_eq!(authenticated["type"], "authenticated");
+    assert!(authenticated["iceServers"].is_array());
+    assert!(authenticated["maxReceivers"].is_number());
 }
 
 async fn next_json(socket: &mut ClientSocket) -> Value {
@@ -204,4 +207,56 @@ async fn rejects_connections_above_the_global_and_per_ip_limit() {
 
     drop(first);
     drop(second);
+}
+
+#[tokio::test]
+async fn blocks_repeated_access_code_failures() {
+    let server = TestServer::start(ResourceLimits::default()).await;
+    let mut receiver = server.connect("recv", "protected-room").await;
+    authenticate(&mut receiver, "Correct123").await;
+
+    for _ in 0..8 {
+        let mut intruder = server.connect("send", "protected-room").await;
+        intruder
+            .send(Message::Text(
+                json!({ "type": "authenticate", "key": "Wrong123" })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send wrong authentication");
+        assert_eq!(u16::from(next_close(&mut intruder).await.code), 4003);
+    }
+
+    let mut blocked = server.connect("send", "protected-room").await;
+    blocked
+        .send(Message::Text(
+            json!({ "type": "authenticate", "key": "Correct123" })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("send blocked authentication");
+    assert_eq!(u16::from(next_close(&mut blocked).await.code), 4028);
+}
+
+#[tokio::test]
+async fn rate_limits_binary_frames_too() {
+    let server = TestServer::start(ResourceLimits::default()).await;
+    let mut receiver = server.connect("recv", "binary-room").await;
+    authenticate(&mut receiver, "123456").await;
+
+    for _ in 0..64 {
+        receiver
+            .send(Message::Binary(vec![1].into()))
+            .await
+            .expect("send binary signal");
+        let error = next_json(&mut receiver).await;
+        assert_eq!(error["code"], "INVALID_SIGNAL");
+    }
+    receiver
+        .send(Message::Binary(vec![1].into()))
+        .await
+        .expect("send rate-limited signal");
+    assert_eq!(u16::from(next_close(&mut receiver).await.code), 4029);
 }

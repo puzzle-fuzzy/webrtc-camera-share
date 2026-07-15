@@ -7,14 +7,19 @@ import {
 } from "@/features/signaling"
 import { socketUrl, type Session } from "@/features/session"
 
+const ICE_RECOVERY_TIMEOUT_MS = 25_000
+
 export function useReceiver() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const connectionRef = useRef<RTCPeerConnection | null>(null)
+  const configControllerRef = useRef<AbortController | null>(null)
   const rtcConfigurationRef = useRef<RTCConfiguration>({ iceServers: [] })
   const iceCandidatesRef = useRef<RTCIceCandidateInit[]>([])
   const processingIceRef = useRef<RTCPeerConnection | null>(null)
+  const recoveryTimerRef = useRef<number | null>(null)
   const generationRef = useRef(0)
+  const activeRef = useRef(false)
   const maxReceiversRef = useRef(8)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState(
@@ -24,6 +29,11 @@ export function useReceiver() {
   const closePeerConnection = useCallback((clearCandidates = true) => {
     const connection = connectionRef.current
     connectionRef.current = null
+    if (processingIceRef.current === connection) processingIceRef.current = null
+    if (recoveryTimerRef.current !== null) {
+      clearTimeout(recoveryTimerRef.current)
+      recoveryTimerRef.current = null
+    }
     if (clearCandidates) iceCandidatesRef.current = []
     if (connection) {
       connection.onicecandidate = null
@@ -41,6 +51,9 @@ export function useReceiver() {
   const releaseResources = useCallback(
     (updateState: boolean) => {
       generationRef.current += 1
+      activeRef.current = false
+      configControllerRef.current?.abort()
+      configControllerRef.current = null
       const socket = socketRef.current
       socketRef.current = null
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000)
@@ -84,9 +97,7 @@ export function useReceiver() {
         if (!candidate) continue
         try {
           await connection.addIceCandidate(candidate)
-        } catch (error) {
-          console.warn("Failed to add ICE candidate", error)
-        }
+        } catch {}
       }
     } finally {
       if (processingIceRef.current === connection) processingIceRef.current = null
@@ -106,6 +117,10 @@ export function useReceiver() {
       if (connectionRef.current !== connection) return
 
       if (connection.connectionState === "connected") {
+        if (recoveryTimerRef.current !== null) {
+          clearTimeout(recoveryTimerRef.current)
+          recoveryTimerRef.current = null
+        }
         if (videoRef.current) videoRef.current.muted = false
         setStatus("连接建立")
       } else if (connection.connectionState === "failed") {
@@ -121,14 +136,25 @@ export function useReceiver() {
         connection.iceConnectionState === "disconnected"
       ) {
         setStatus("ICE 暂时断开，正在恢复...")
+        if (recoveryTimerRef.current === null) {
+          recoveryTimerRef.current = window.setTimeout(() => {
+            recoveryTimerRef.current = null
+            if (
+              connectionRef.current === connection &&
+              connection.connectionState !== "connected"
+            ) {
+              closePeerConnection()
+              setStatus("ICE 恢复超时，请停止后重新接收")
+            }
+          }, ICE_RECOVERY_TIMEOUT_MS)
+        }
       }
     }
     connection.ontrack = (event) => {
       if (connectionRef.current !== connection || !videoRef.current) return
       videoRef.current.srcObject =
         event.streams[0] ?? new MediaStream([event.track])
-      void videoRef.current.play().catch((error: unknown) => {
-        console.warn("Failed to autoplay remote video", error)
+      void videoRef.current.play().catch(() => {
         if (connectionRef.current === connection) {
           setStatus("已收到视频流，请点击播放器开始播放")
         }
@@ -154,8 +180,7 @@ export function useReceiver() {
           sendSignal({ sdp: answer })
           setStatus("已回复应答，正在建立连接...")
         }
-      } catch (error) {
-        console.error("Failed to handle offer", error)
+      } catch {
         if (connectionRef.current === connection) {
           closePeerConnection()
           setStatus("处理连接请求失败")
@@ -167,7 +192,8 @@ export function useReceiver() {
 
   const start = useCallback(
     async (session: Session) => {
-      if (running) return
+      if (activeRef.current) return
+      activeRef.current = true
 
       const generation = generationRef.current + 1
       generationRef.current = generation
@@ -175,7 +201,14 @@ export function useReceiver() {
       setStatus("正在加载连接配置...")
       if (videoRef.current) videoRef.current.muted = true
 
-      const runtimeConfiguration = await loadRuntimeConfiguration()
+      const configController = new AbortController()
+      configControllerRef.current = configController
+      const runtimeConfiguration = await loadRuntimeConfiguration(
+        configController.signal,
+      )
+      if (configControllerRef.current === configController) {
+        configControllerRef.current = null
+      }
       if (generationRef.current !== generation) return
       rtcConfigurationRef.current = runtimeConfiguration.rtcConfiguration
       maxReceiversRef.current = runtimeConfiguration.maxReceivers
@@ -193,6 +226,8 @@ export function useReceiver() {
         if (!signal) return
 
         if (signal.type === "authenticated") {
+          rtcConfigurationRef.current = { iceServers: signal.iceServers }
+          maxReceiversRef.current = signal.maxReceivers
           setStatus(`已加入 ${session.room}，等待发送端...`)
           sendSignal({ type: "receiver-ready" })
           return
@@ -232,7 +267,6 @@ export function useReceiver() {
       closePeerConnection,
       handleOffer,
       processIceCandidates,
-      running,
       sendSignal,
       stop,
     ],
@@ -263,8 +297,12 @@ function receiverCloseMessage(code: number, maxReceivers: number): string {
       return "服务房间数量已达上限，请稍后重试"
     case 4012:
       return "房间鉴权超时，请重新加入"
+    case 4028:
+      return "访问码尝试次数过多，请稍后重试"
     case 4029:
       return "信令发送过快，连接已关闭"
+    case 4030:
+      return "临时 TURN 凭据请求过多，请稍后重试"
     case 1006:
       return "无法加入房间，请检查房间信息和服务状态"
     default:

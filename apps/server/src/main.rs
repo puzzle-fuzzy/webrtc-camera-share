@@ -18,13 +18,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         web_dist,
         limits,
         ice_servers,
+        turn,
         trust_proxy,
     } = Config::from_env()?;
     let listener = TcpListener::bind(address).await?;
 
     tracing::info!(address = %address, web_dist = %web_dist.display(), "server started");
 
-    let app = build_app(AppState::new(limits, ice_servers, trust_proxy), web_dist);
+    let app = build_app(
+        AppState::new(limits, ice_servers, turn, trust_proxy),
+        web_dist,
+    );
 
     axum::serve(
         listener,

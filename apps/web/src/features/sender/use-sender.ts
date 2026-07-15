@@ -10,11 +10,16 @@ import { socketUrl, type Session } from "@/features/session"
 const TOTAL_VIDEO_BITRATE_BUDGET = 6_000_000
 const MIN_VIDEO_BITRATE_PER_VIEWER = 300_000
 const MAX_VIDEO_BITRATE_PER_VIEWER = 2_500_000
+const ICE_DISCONNECTED_GRACE_MS = 5_000
+const ICE_RECOVERY_TIMEOUT_MS = 15_000
 
 type PeerState = {
   connection: RTCPeerConnection
   iceCandidates: RTCIceCandidateInit[]
+  localIceCandidates: RTCIceCandidateInit[]
+  offerPending: boolean
   processingIce: boolean
+  recoveryTimer?: number
   videoSender?: RTCRtpSender
 }
 
@@ -27,9 +32,11 @@ export function useSender() {
   const previewRef = useRef<HTMLVideoElement>(null)
   const socketRef = useRef<WebSocket>(null)
   const streamRef = useRef<MediaStream>(null)
+  const configControllerRef = useRef<AbortController>(null)
   const rtcConfigurationRef = useRef<RTCConfiguration>({ iceServers: [] })
   const peersRef = useRef(new Map<string, PeerState>())
   const generationRef = useRef(0)
+  const activeRef = useRef(false)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState("配置房间后开始发送")
   const [viewers, setViewers] = useState<ViewerCount>({
@@ -77,7 +84,9 @@ export function useSender() {
       if (!peer) return
 
       peersRef.current.delete(peerId)
+      if (peer.recoveryTimer !== undefined) clearTimeout(peer.recoveryTimer)
       peer.iceCandidates.length = 0
+      peer.localIceCandidates.length = 0
       peer.connection.onicecandidate = null
       peer.connection.onconnectionstatechange = null
       peer.connection.oniceconnectionstatechange = null
@@ -90,7 +99,9 @@ export function useSender() {
 
   const closeAllPeerConnections = useCallback((updateState: boolean) => {
     for (const peer of peersRef.current.values()) {
+      if (peer.recoveryTimer !== undefined) clearTimeout(peer.recoveryTimer)
       peer.iceCandidates.length = 0
+      peer.localIceCandidates.length = 0
       peer.connection.onicecandidate = null
       peer.connection.onconnectionstatechange = null
       peer.connection.oniceconnectionstatechange = null
@@ -103,6 +114,9 @@ export function useSender() {
   const releaseResources = useCallback(
     (updateState: boolean) => {
       generationRef.current += 1
+      activeRef.current = false
+      configControllerRef.current?.abort()
+      configControllerRef.current = null
       const socket = socketRef.current
       socketRef.current = null
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000)
@@ -151,15 +165,79 @@ export function useSender() {
           if (!candidate) continue
           try {
             await peer.connection.addIceCandidate(candidate)
-          } catch (error) {
-            console.warn("Failed to add ICE candidate", error)
-          }
+          } catch {}
         }
       } finally {
         peer.processingIce = false
       }
     },
     [],
+  )
+
+  const sendPeerOffer = useCallback(
+    async (peerId: string, peer: PeerState, iceRestart = false) => {
+      if (
+        peersRef.current.get(peerId) !== peer ||
+        socketRef.current?.readyState !== WebSocket.OPEN
+      ) {
+        return false
+      }
+
+      try {
+        peer.offerPending = true
+        const offer = await peer.connection.createOffer({ iceRestart })
+        await peer.connection.setLocalDescription(offer)
+        if (peersRef.current.get(peerId) !== peer) return false
+        sendSignal({ peerId, sdp: offer })
+        peer.offerPending = false
+        for (const candidate of peer.localIceCandidates.splice(0)) {
+          sendSignal({ peerId, ice: candidate })
+        }
+        return true
+      } catch {
+        if (peersRef.current.get(peerId) === peer) {
+          closePeerConnection(peerId)
+          setStatus(
+            iceRestart
+              ? "一个接收端恢复连接失败，已释放该连接"
+              : "为一个接收端创建连接失败",
+          )
+        }
+        return false
+      }
+    },
+    [closePeerConnection, sendSignal],
+  )
+
+  const scheduleIceRecovery = useCallback(
+    (peerId: string, peer: PeerState) => {
+      if (peer.recoveryTimer !== undefined) return
+      peer.recoveryTimer = window.setTimeout(() => {
+        peer.recoveryTimer = undefined
+        if (
+          peersRef.current.get(peerId) !== peer ||
+          peer.connection.connectionState === "connected"
+        ) {
+          return
+        }
+
+        setStatus("一个接收端连接中断，正在尝试 ICE 恢复...")
+        void sendPeerOffer(peerId, peer, true).then((sent) => {
+          if (!sent || peersRef.current.get(peerId) !== peer) return
+          peer.recoveryTimer = window.setTimeout(() => {
+            peer.recoveryTimer = undefined
+            if (
+              peersRef.current.get(peerId) === peer &&
+              peer.connection.connectionState !== "connected"
+            ) {
+              closePeerConnection(peerId)
+              setStatus("一个接收端恢复超时，已释放该连接")
+            }
+          }, ICE_RECOVERY_TIMEOUT_MS)
+        })
+      }, ICE_DISCONNECTED_GRACE_MS)
+    },
+    [closePeerConnection, sendPeerOffer],
   )
 
   const createAndSendOffer = useCallback(
@@ -172,6 +250,8 @@ export function useSender() {
       const peer: PeerState = {
         connection,
         iceCandidates: [],
+        localIceCandidates: [],
+        offerPending: true,
         processingIce: false,
       }
       peersRef.current.set(peerId, peer)
@@ -182,7 +262,17 @@ export function useSender() {
 
       connection.onicecandidate = (event) => {
         if (peersRef.current.get(peerId) === peer && event.candidate) {
-          sendSignal({ peerId, ice: event.candidate.toJSON() })
+          const candidate = event.candidate.toJSON()
+          if (peer.offerPending) {
+            if (peer.localIceCandidates.length >= MAX_PENDING_ICE_CANDIDATES) {
+              closePeerConnection(peerId)
+              setStatus("本地 ICE 候选过多，已释放该连接")
+              return
+            }
+            peer.localIceCandidates.push(candidate)
+          } else {
+            sendSignal({ peerId, ice: candidate })
+          }
         }
       }
       connection.onconnectionstatechange = () => {
@@ -190,6 +280,10 @@ export function useSender() {
         updateViewerCount()
 
         if (connection.connectionState === "connected") {
+          if (peer.recoveryTimer !== undefined) {
+            clearTimeout(peer.recoveryTimer)
+            peer.recoveryTimer = undefined
+          }
           const connected = [...peersRef.current.values()].filter(
             (candidate) => candidate.connection.connectionState === "connected",
           ).length
@@ -205,6 +299,7 @@ export function useSender() {
           connection.iceConnectionState === "disconnected"
         ) {
           setStatus("一个接收端暂时断开，正在恢复...")
+          scheduleIceRecovery(peerId, peer)
         }
       }
 
@@ -212,23 +307,13 @@ export function useSender() {
       void rebalanceVideoBitrates()
       setStatus(`${peersRef.current.size} 个接收端已加入，正在协商...`)
 
-      try {
-        const offer = await connection.createOffer()
-        await connection.setLocalDescription(offer)
-        if (peersRef.current.get(peerId) === peer) {
-          sendSignal({ peerId, sdp: offer })
-        }
-      } catch (error) {
-        console.error("Failed to create offer", error)
-        if (peersRef.current.get(peerId) === peer) {
-          closePeerConnection(peerId)
-          setStatus("为一个接收端创建连接失败")
-        }
-      }
+      await sendPeerOffer(peerId, peer)
     },
     [
       closePeerConnection,
       rebalanceVideoBitrates,
+      scheduleIceRecovery,
+      sendPeerOffer,
       sendSignal,
       updateViewerCount,
     ],
@@ -236,7 +321,8 @@ export function useSender() {
 
   const start = useCallback(
     async (session: Session) => {
-      if (running) return
+      if (activeRef.current) return
+      activeRef.current = true
 
       const generation = generationRef.current + 1
       generationRef.current = generation
@@ -244,23 +330,30 @@ export function useSender() {
       setStatus("正在请求摄像头权限...")
 
       try {
-        const [stream, runtimeConfiguration] = await Promise.all([
-          navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: "environment",
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
-          }),
-          loadRuntimeConfiguration(),
-        ])
+        const configController = new AbortController()
+        configControllerRef.current = configController
+        const runtimeConfigurationPromise = loadRuntimeConfiguration(
+          configController.signal,
+        )
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: "environment",
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+        })
         if (generationRef.current !== generation) {
           stream.getTracks().forEach((track) => track.stop())
           return
         }
 
-        rtcConfigurationRef.current = runtimeConfiguration.rtcConfiguration
         streamRef.current = stream
+        const runtimeConfiguration = await runtimeConfigurationPromise
+        if (configControllerRef.current === configController) {
+          configControllerRef.current = null
+        }
+        if (generationRef.current !== generation) return
+        rtcConfigurationRef.current = runtimeConfiguration.rtcConfiguration
         if (previewRef.current) {
           previewRef.current.srcObject = stream
           await previewRef.current.play()
@@ -281,6 +374,7 @@ export function useSender() {
           if (!signal) return
 
           if (signal.type === "authenticated") {
+            rtcConfigurationRef.current = { iceServers: signal.iceServers }
             setStatus(`已加入 ${session.room}，等待接收端...`)
             return
           }
@@ -314,8 +408,7 @@ export function useSender() {
               if (peersRef.current.get(signal.peerId) === peer) {
                 setStatus("已收到接收端应答，正在建立连接...")
               }
-            } catch (error) {
-              console.error("Failed to apply receiver answer", error)
+            } catch {
               if (peersRef.current.get(signal.peerId) === peer) {
                 closePeerConnection(signal.peerId)
                 setStatus("接收端应答无效，已关闭该连接")
@@ -343,7 +436,6 @@ export function useSender() {
         setStatus("正在连接信令服务...")
       } catch (error) {
         if (generationRef.current !== generation) return
-        console.error("Failed to start sender", error)
         const name = error instanceof DOMException ? error.name : ""
         const message = error instanceof Error ? error.message : String(error)
         if (name === "NotAllowedError") stop("摄像头权限被拒绝")
@@ -355,7 +447,6 @@ export function useSender() {
       closePeerConnection,
       createAndSendOffer,
       processIceCandidates,
-      running,
       stop,
     ],
   )
@@ -383,12 +474,16 @@ function senderCloseMessage(code: number): string {
       return "连接空闲超时，请重新开始"
     case 4009:
       return "该房间已有发送端在线"
+    case 4028:
+      return "访问码尝试次数过多，请稍后重试"
     case 4011:
       return "服务房间数量已达上限，请稍后重试"
     case 4012:
       return "房间鉴权超时，请重新开始"
     case 4029:
       return "信令发送过快，连接已关闭"
+    case 4030:
+      return "临时 TURN 凭据请求过多，请稍后重试"
     default:
       return "信令连接已关闭"
   }
