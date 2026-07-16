@@ -11,7 +11,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
 
-use crate::{metrics::ServerMetrics, signal::Role};
+use crate::{domain::signal::Role, infrastructure::metrics::ServerMetrics};
 
 const OUTBOUND_QUEUE_CAPACITY: usize = 32;
 const OUTBOUND_BYTE_CAPACITY: usize = 256 * 1024;

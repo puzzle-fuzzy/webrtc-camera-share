@@ -8,14 +8,15 @@
     "apps/web"
   ],
   "scripts": {
-    "dev": "concurrently --kill-others --names server,web \"cargo run --manifest-path apps/server/Cargo.toml\" \"bun run --cwd apps/web dev\"",
-    "dev:server": "cargo run --manifest-path apps/server/Cargo.toml",
+    "dev": "cargo xtask dev",
+    "dev:server": "cargo run --package webrtc-camera-share-server",
     "dev:web": "bun run --cwd apps/web dev",
-    "build": "bun run --cwd apps/web build && cargo build --manifest-path apps/server/Cargo.toml --release",
+    "build": "cargo xtask build",
+    "release": "cargo xtask release",
     "typecheck": "bun run --cwd apps/web typecheck",
-    "lint": "bun run --cwd apps/web lint && cargo clippy --manifest-path apps/server/Cargo.toml --all-targets -- -D warnings",
-    "test": "bun run --cwd apps/web test && cargo test --manifest-path apps/server/Cargo.toml",
-    "verify": "bun run typecheck && bun run lint && bun run test && bun run --cwd apps/web build"
+    "lint": "bun run --cwd apps/web lint && cargo clippy --package webrtc-camera-share-server --all-targets -- -D warnings",
+    "test": "bun run --cwd apps/web test && cargo test --package webrtc-camera-share-server",
+    "verify": "cargo xtask verify"
   },
   "keywords": [
     "webrtc",
@@ -24,8 +25,5 @@
     "react"
   ],
   "license": "MIT",
-  "packageManager": "bun@1.4.0",
-  "devDependencies": {
-    "concurrently": "^9.2.1"
-  }
+  "packageManager": "bun@1.4.0"
 }

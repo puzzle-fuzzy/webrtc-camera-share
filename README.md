@@ -32,17 +32,19 @@ webrtc-camera-share/
 ├── apps/
 │   ├── server/              # Rust/Axum 后台
 │   │   └── src/
-│   │       ├── app.rs       # HTTP、WebSocket、静态资源和安全响应头
+│   │       ├── domain/      # 房间、角色、容量、访问码与信令规则
+│   │       ├── infrastructure/ # 限流、连接配额、指标与资源计数
+│   │       ├── web/         # Axum HTTP、WebSocket、安全头与静态资源
 │   │       ├── config.rs    # 环境变量配置
-│   │       ├── metrics.rs   # 运行指标与资源计数
-│   │       ├── room.rs      # 房间、角色、容量和访问码策略
-│   │       └── signal.rs    # 信令校验与规范化
+│   │       ├── lib.rs       # 后台库入口
+│   │       └── main.rs      # 进程启动与优雅关闭
 │   └── web/                 # Vite + React 前端
 │       └── src/
 │           ├── components/ui/ # shadcn/ui CLI 生成组件
 │           └── features/      # 会话、发送端和接收端功能
+├── xtask/                   # Cargo 统一开发、验证和发布流程
 ├── Cargo.toml               # Rust workspace
-├── package.json             # Bun workspace 与统一脚本
+├── package.json             # Bun workspace 与前端兼容脚本
 └── docs/PRODUCT.md          # 产品边界与交互原则
 ```
 
@@ -52,7 +54,7 @@ webrtc-camera-share/
 
 ```bash
 bun install
-bun run dev
+cargo xtask dev
 ```
 
 默认地址：
@@ -64,21 +66,32 @@ bun run dev
 
 Vite 会把 `/ws`、`/config`、`/health`、`/ready` 与 `/metrics` 代理到 Rust 后台。
 
-也可以分别启动：
+`cargo xtask dev` 会同时启动 Rust 后台和 Vite 开发服务器；Bun 只负责前端开发工具链。也可以分别启动：
 
 ```bash
-bun run dev:server
-bun run dev:web
+cargo run --package webrtc-camera-share-server
+bun run --cwd apps/web dev
 ```
 
 ## 生产构建与启动
 
+推荐生成内嵌前端资源的单一 Rust 可执行文件：
+
 ```bash
-bun run build
-cargo run --release --manifest-path apps/server/Cargo.toml
+cargo xtask release
+./target/release/webrtc-camera-share-server
 ```
 
-Rust 后台默认从 `apps/web/dist` 提供生产前端，并监听 `0.0.0.0:5011`。
+该发布命令先由 Vite 构建前端，再启用 Rust 的 `embed-web` feature 将产物编译进后台；复制可执行文件后即可启动，不需要同时复制 `apps/web/dist`。后台默认监听 `0.0.0.0:5011`。
+
+如果需要让前端资源与后台二进制独立更新，可改用文件系统模式：
+
+```bash
+cargo xtask build
+./target/release/webrtc-camera-share-server
+```
+
+文件系统模式默认从 `apps/web/dist` 提供前端，也可通过 `WEB_DIST` 指定其他目录。
 
 可用环境变量：
 
@@ -86,7 +99,7 @@ Rust 后台默认从 `apps/web/dist` 提供生产前端，并监听 `0.0.0.0:501
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | 后台监听 IP |
 | `PORT` | `5011` | 后台监听端口 |
-| `WEB_DIST` | `apps/web/dist` | Vite 构建目录 |
+| `WEB_DIST` | `apps/web/dist` | 文件系统构建模式使用的 Vite 目录；内嵌发布模式忽略此项 |
 | `MAX_CONNECTIONS` | `256` | WebSocket 全局并发上限，范围 1–4096 |
 | `MAX_CONNECTIONS_PER_IP` | `32` | 单个来源 IP 的 WebSocket 并发上限，范围 1–256，且不大于全局上限 |
 | `MAX_RECEIVERS` | `8` | 每个房间的接收端上限，范围 1–8 |
@@ -114,10 +127,10 @@ coturn 需启用 `use-auth-secret`，并把 `static-auth-secret` 配置为相同
 ## 验证
 
 ```bash
-bun run verify
+cargo xtask verify
 ```
 
-该命令依次执行前端类型检查、前后端 Lint、Bun/Rust 单测与 Vite 生产构建。
+该命令校验 Bun 锁文件并安装依赖，然后执行前端类型检查、ESLint、Bun 单测、Vite 生产构建、Rust 格式检查，并分别在文件系统模式和内嵌模式执行 Clippy 与 Rust 单测。原有的 `bun run dev/build/verify` 仍作为兼容入口转发给 Cargo 工作流。
 
 ## 怎么使用
 
@@ -133,12 +146,12 @@ bun run verify
 
 ```bash
 bun install --frozen-lockfile
-bun run verify
-bun run build
+cargo xtask verify
+cargo xtask release
 ./target/release/webrtc-camera-share-server
 ```
 
-如果从项目目录之外启动可执行文件，请将 `WEB_DIST` 设置为 `apps/web/dist` 的绝对路径。建议由 Caddy、Nginx 或云负载均衡终止 HTTPS，再反向代理到 `127.0.0.1:5011`；只有在代理会清除并重写客户端 IP 请求头时才设置 `TRUST_PROXY=true`。
+推荐的内嵌发布可以从任意目录启动；只有使用 `cargo xtask build` 的文件系统模式并从项目外启动时，才需要将 `WEB_DIST` 设置为 `apps/web/dist` 的绝对路径。建议由 Caddy、Nginx 或云负载均衡终止 HTTPS，再反向代理到 `127.0.0.1:5011`；只有在代理会清除并重写客户端 IP 请求头时才设置 `TRUST_PROXY=true`。
 
 跨公网使用时必须提供 HTTPS 才能稳定获得浏览器摄像头权限。复杂 NAT 或企业网络环境应配置临时 TURN 凭据；仅使用公共 STUN 不能保证所有网络都能连通。
 

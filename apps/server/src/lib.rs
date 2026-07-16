@@ -1,11 +1,10 @@
-mod app;
 mod config;
-mod metrics;
-mod room;
-mod signal;
+mod domain;
+mod infrastructure;
+mod web;
 
-pub use app::{AppState, build_app};
 pub use config::{Config, IceServerConfig, IceServerUrls, ResourceLimits, TurnConfig};
+pub use web::{AppState, build_app};
 
 pub async fn shutdown_signal() {
     let ctrl_c = async {
