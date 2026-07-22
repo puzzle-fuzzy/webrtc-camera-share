@@ -1,0 +1,101 @@
+name: webrtc-camera-share
+
+services:
+  app:
+    image: webrtc-camera-share:${APP_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5011
+      HEALTHCHECK_HOST: 127.0.0.1
+      TRUST_PROXY: "true"
+      ALLOWED_ORIGINS_JSON: '["https://${APP_DOMAIN:?Set APP_DOMAIN in .env}"]'
+      METRICS_TOKEN: ${METRICS_TOKEN:?Set METRICS_TOKEN in .env}
+      ICE_SERVERS_JSON: '[{"urls":"stun:${TURN_DOMAIN:?Set TURN_DOMAIN in .env}:3478"}]'
+      TURN_URLS_JSON: '["turn:${TURN_DOMAIN}:3478?transport=udp","turn:${TURN_DOMAIN}:3478?transport=tcp","turns:${TURN_DOMAIN}:5349?transport=tcp"]'
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET in .env}
+      MAX_CONNECTIONS: ${MAX_CONNECTIONS:-256}
+      MAX_CONNECTIONS_PER_IP: ${MAX_CONNECTIONS_PER_IP:-32}
+      MAX_RECEIVERS: ${MAX_RECEIVERS:-8}
+      MAX_ROOMS: ${MAX_ROOMS:-128}
+      RUST_LOG: ${RUST_LOG:-webrtc_camera_share_server=info}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/webrtc-camera-share-server", "--healthcheck"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 2.0
+    networks:
+      - web
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/caddy/Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - web
+
+  coturn:
+    image: coturn/coturn:4.14.0-r0
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -c
+      - /etc/coturn/turnserver.conf
+      - --realm=${TURN_DOMAIN:?Set TURN_DOMAIN in .env}
+      - --server-name=${TURN_DOMAIN}
+      - --external-ip=${TURN_EXTERNAL_IP:?Set TURN_EXTERNAL_IP in .env}
+      - --static-auth-secret=${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET in .env}
+      - --cert=/run/secrets/turn-cert.pem
+      - --pkey=/run/secrets/turn-key.pem
+    volumes:
+      - ./deploy/coturn/turnserver.conf.example:/etc/coturn/turnserver.conf:ro
+      - ${TURN_CERT_FILE:?Set TURN_CERT_FILE in .env}:/run/secrets/turn-cert.pem:ro
+      - ${TURN_KEY_FILE:?Set TURN_KEY_FILE in .env}:/run/secrets/turn-key.pem:ro
+    healthcheck:
+      test: ["CMD", "turnutils_stunclient", "-p", "3478", "127.0.0.1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 2.0
+
+networks:
+  web:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

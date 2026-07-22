@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+node_modules
+apps/web/node_modules
+apps/web/dist
+target
+dist
+docs/superpowers
+*.log
+*.tsbuildinfo
+.DS_Store

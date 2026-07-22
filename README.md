@@ -42,15 +42,19 @@ webrtc-camera-share/
 │       └── src/
 │           ├── components/ui/ # shadcn/ui CLI 生成组件
 │           └── features/      # 会话、发送端和接收端功能
+├── deploy/                  # Caddy、coturn 与 systemd 生产示例
+├── scripts/                 # 发布冒烟、归档与长稳工具
 ├── xtask/                   # Cargo 统一开发、验证和发布流程
+├── Dockerfile               # 非 root 的内嵌前端生产镜像
+├── compose.example.yml      # 应用、Caddy 与 coturn 编排示例
 ├── Cargo.toml               # Rust workspace
 ├── package.json             # Bun workspace 与前端兼容脚本
-└── docs/PRODUCT.md          # 产品边界与交互原则
+└── docs/                    # 产品边界、部署手册与设计记录
 ```
 
 ## 本地开发
 
-需要 Bun 1.4+ 与 Rust 1.97+。
+需要 Bun 1.3.14+ 与 Rust 1.97+。
 
 ```bash
 bun install
@@ -92,6 +96,16 @@ cargo xtask build
 ```
 
 文件系统模式默认从 `apps/web/dist` 提供前端，也可通过 `WEB_DIST` 指定其他目录。
+
+生产模板使用非 root 应用容器、Caddy HTTPS 和有界端口/配额的 coturn。它们不会自动部署到公网；使用前必须填写独立密钥、域名、证书和公网/私网 IP，并先渲染检查配置：
+
+```bash
+cp .env.example .env
+docker compose -f compose.example.yml --env-file .env config
+docker compose -f compose.example.yml --env-file .env up -d --build
+```
+
+完整的 DNS、防火墙、证书、监控、升级、回滚、事件响应和腾讯云待执行清单见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。当前状态是仓库内生产准备，尚未声称已完成公网部署。
 
 可用环境变量：
 

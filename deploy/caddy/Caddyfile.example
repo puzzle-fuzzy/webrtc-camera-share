@@ -1,0 +1,26 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	log {
+		output stdout
+		format json
+	}
+
+	reverse_proxy app:5011 {
+		health_uri /ready
+		health_interval 15s
+		health_timeout 3s
+
+		# Caddy is the only trusted proxy. Overwrite rather than append client input.
+		header_up Host {hostport}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Host {hostport}
+		header_up X-Forwarded-Proto {scheme}
+		header_up -Forwarded
+	}
+}

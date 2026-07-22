@@ -10,6 +10,8 @@
 - 增加 Chromium 真实 WebRTC 端到端验收、独立测试服务编排和移动端可用性检查。
 - 增加可选指标 Bearer 鉴权、浏览器 WebSocket Origin 策略和 1012 优雅停机通知。
 - 增加跨平台发布冒烟、依赖自动更新、CI 和草稿 Release 工作流。
+- 增加非 root 应用镜像、Caddy/coturn/Compose/systemd 示例和完整生产运维手册。
+- 增加可由容器和 systemd 外部探针调用的内置 `--healthcheck`。
 
 ### Changed
 

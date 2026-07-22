@@ -4,7 +4,7 @@
 
 ## 开发环境
 
-需要 Bun 1.4、Rust 1.97、Git；浏览器验收还需要 Chromium。首次准备：
+需要 Bun 1.3.14、Rust 1.97、Git；浏览器验收还需要 Chromium。首次准备：
 
 ```bash
 bun install --frozen-lockfile
