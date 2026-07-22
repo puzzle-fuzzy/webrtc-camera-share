@@ -1,7 +1,6 @@
 import type { ReactNode } from "react"
-import { GitForkIcon, InfoIcon } from "lucide-react"
+import { ArrowUpRightIcon, InfoIcon } from "lucide-react"
 
-import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 export const GITHUB_URL =
@@ -9,38 +8,40 @@ export const GITHUB_URL =
 
 type PageShellProps = {
   children: ReactNode
-  currentPage?: "about"
+  currentPage?: "send" | "recv" | "about"
 }
 
 export function PageShell({ children, currentPage }: PageShellProps) {
   return (
-    <main className="mx-auto flex min-h-svh w-full max-w-3xl flex-col justify-center gap-3 p-4 md:p-6">
-      {children}
+    <main className="editorial-shell">
+      <header className="editorial-masthead">
+        <a className="editorial-brand" href="/send" aria-label="Camera Share 首页">
+          CAMERA SHARE
+        </a>
+        <span className="editorial-masthead-meta">PRIVATE MEDIA / WEBRTC</span>
+        <span className="editorial-masthead-count">MAX 8 VIEWERS</span>
+      </header>
+      <div className="editorial-content">{children}</div>
       <nav
         aria-label="项目信息"
-        className="grid grid-cols-2 gap-2 sm:flex sm:justify-center"
+        className="editorial-footer"
       >
         <a
           aria-current={currentPage === "about" ? "page" : undefined}
-          className={cn(
-            buttonVariants({
-              variant: currentPage === "about" ? "secondary" : "ghost",
-              size: "lg",
-            }),
-          )}
+          className={cn("editorial-footer-link", currentPage === "about" && "is-active")}
           href="/about"
         >
-          <InfoIcon data-icon="inline-start" />
-          关于
+          <InfoIcon aria-hidden="true" />
+          <span>ABOUT / 关于</span>
         </a>
         <a
-          className={cn(buttonVariants({ variant: "ghost", size: "lg" }))}
+          className="editorial-footer-link"
           href={GITHUB_URL}
           target="_blank"
           rel="noreferrer"
         >
-          <GitForkIcon data-icon="inline-start" />
-          GitHub
+          <span>OPEN SOURCE / GitHub</span>
+          <ArrowUpRightIcon aria-hidden="true" />
         </a>
       </nav>
     </main>

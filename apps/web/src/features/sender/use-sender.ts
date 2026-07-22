@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import {
   loadRuntimeConfiguration,
   MAX_PENDING_ICE_CANDIDATES,
+  isRetryableSignalingClose,
   parseServerSignal,
 } from "@/features/signaling"
 import { socketUrl, type Session } from "@/features/session"
@@ -22,6 +23,8 @@ const MIN_VIDEO_BITRATE_PER_VIEWER = 300_000
 const MAX_VIDEO_BITRATE_PER_VIEWER = 2_500_000
 const ICE_DISCONNECTED_GRACE_MS = 5_000
 const ICE_RECOVERY_TIMEOUT_MS = 15_000
+const MAX_SIGNALING_RECONNECT_ATTEMPTS = 5
+const SIGNALING_RECONNECT_BASE_MS = 1_000
 
 type PeerState = {
   connection: RTCPeerConnection
@@ -47,6 +50,13 @@ export function useSender() {
   const peersRef = useRef(new Map<string, PeerState>())
   const generationRef = useRef(0)
   const activeRef = useRef(false)
+  const sessionRef = useRef<Session | null>(null)
+  const intentionalStopRef = useRef(true)
+  const reconnectTimerRef = useRef<number | null>(null)
+  const reconnectAttemptRef = useRef(0)
+  const connectSocketRef = useRef<
+    ((session: Session, generation: number) => void) | null
+  >(null)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState<ConnectionStatus>(() =>
     infoStatus("配置房间后开始发送"),
@@ -128,6 +138,12 @@ export function useSender() {
     (updateState: boolean) => {
       generationRef.current += 1
       activeRef.current = false
+      intentionalStopRef.current = true
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
+      reconnectAttemptRef.current = 0
       configControllerRef.current?.abort()
       configControllerRef.current = null
       const socket = socketRef.current
@@ -145,11 +161,57 @@ export function useSender() {
 
   const stop = useCallback(
     (nextStatus: ConnectionStatus = infoStatus("已停止发送")) => {
+      intentionalStopRef.current = true
       releaseResources(true)
       setRunning(false)
       setStatus(nextStatus)
     },
     [releaseResources],
+  )
+
+  const scheduleSignalingReconnect = useCallback(
+    (code: number, generation: number) => {
+      if (
+        intentionalStopRef.current ||
+        !activeRef.current ||
+        generationRef.current !== generation ||
+        reconnectTimerRef.current !== null
+      ) {
+        return
+      }
+
+      const attempt = reconnectAttemptRef.current + 1
+      if (attempt > MAX_SIGNALING_RECONNECT_ATTEMPTS) {
+        stop(errorStatus("信令服务多次重连失败，请检查网络后重试"))
+        return
+      }
+
+      reconnectAttemptRef.current = attempt
+      const delay = Math.min(
+        SIGNALING_RECONNECT_BASE_MS * 2 ** (attempt - 1),
+        30_000,
+      )
+      setStatus(
+        infoStatus(
+          `信令连接已断开，将在 ${Math.ceil(delay / 1000)} 秒后重连（${attempt}/${MAX_SIGNALING_RECONNECT_ATTEMPTS}）`,
+        ),
+      )
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null
+        if (
+          intentionalStopRef.current ||
+          !activeRef.current ||
+          generationRef.current !== generation
+        ) {
+          return
+        }
+        const session = sessionRef.current
+        if (session) connectSocketRef.current?.(session, generation)
+      }, delay)
+
+      if (code === 1012) setStatus(infoStatus("服务正在重启，准备重新连接..."))
+    },
+    [stop],
   )
 
   const sendSignal = useCallback((signal: unknown) => {
@@ -333,6 +395,118 @@ export function useSender() {
     ],
   )
 
+  const connectSocket = useCallback(
+    (session: Session, generation: number) => {
+      if (
+        intentionalStopRef.current ||
+        !activeRef.current ||
+        generationRef.current !== generation
+      ) {
+        return
+      }
+
+      const socket = new WebSocket(socketUrl("send", session))
+      socketRef.current = socket
+      socket.onopen = () => {
+        if (
+          socketRef.current === socket &&
+          generationRef.current === generation
+        ) {
+          socket.send(JSON.stringify({ type: "authenticate", key: session.key }))
+          setStatus(infoStatus("正在验证房间访问码..."))
+        }
+      }
+      socket.onmessage = async (event) => {
+        if (
+          socketRef.current !== socket ||
+          generationRef.current !== generation
+        ) {
+          return
+        }
+        const signal = parseServerSignal(event.data)
+        if (!signal) return
+
+        if (signal.type === "authenticated") {
+          reconnectAttemptRef.current = 0
+          rtcConfigurationRef.current = { iceServers: signal.iceServers }
+          setStatus(successStatus(`已加入 ${session.room}，等待接收端...`))
+          return
+        }
+        if (signal.type === "receiver-ready") {
+          await createAndSendOffer(signal.peerId)
+          return
+        }
+        if (signal.type === "peer-left" && signal.role === "recv") {
+          closePeerConnection(signal.peerId)
+          setStatus(
+            peersRef.current.size === 0
+              ? infoStatus("接收端已全部离线，继续等待...")
+              : successStatus(`${peersRef.current.size} 个接收端仍在线`),
+          )
+          return
+        }
+        if (signal.type === "error") {
+          if (signal.code === "PEER_NOT_FOUND" && signal.peerId) {
+            closePeerConnection(signal.peerId)
+          }
+          setStatus(errorStatus(`连接服务返回错误：${signal.message}`))
+          return
+        }
+
+        if ("sdp" in signal && signal.sdp.type === "answer" && signal.peerId) {
+          const peer = peersRef.current.get(signal.peerId)
+          if (!peer || peer.connection.signalingState !== "have-local-offer") return
+          try {
+            await peer.connection.setRemoteDescription(signal.sdp)
+            await processIceCandidates(signal.peerId, peer)
+            if (peersRef.current.get(signal.peerId) === peer) {
+              setStatus(infoStatus("已收到接收端应答，正在建立连接..."))
+            }
+          } catch {
+            if (peersRef.current.get(signal.peerId) === peer) {
+              closePeerConnection(signal.peerId)
+              setStatus(errorStatus("接收端应答无效，已关闭该连接"))
+            }
+          }
+        } else if ("ice" in signal && signal.peerId) {
+          const peer = peersRef.current.get(signal.peerId)
+          if (!peer) return
+          if (peer.iceCandidates.length >= MAX_PENDING_ICE_CANDIDATES) {
+            closePeerConnection(signal.peerId)
+            setStatus(errorStatus("一个接收端发送了过多连接候选，已关闭该连接"))
+            return
+          }
+          peer.iceCandidates.push(signal.ice)
+          await processIceCandidates(signal.peerId, peer)
+        }
+      }
+      socket.onerror = () => {
+        if (socketRef.current === socket) {
+          setStatus(infoStatus("信令连接中断，正在准备恢复..."))
+        }
+      }
+      socket.onclose = (event) => {
+        if (socketRef.current !== socket) return
+        if (!isRetryableSignalingClose(event.code)) {
+          stop(senderCloseStatus(event.code))
+          return
+        }
+        socketRef.current = null
+        closeAllPeerConnections(true)
+        scheduleSignalingReconnect(event.code, generation)
+      }
+      setStatus(infoStatus("正在连接信令服务..."))
+    },
+    [
+      closeAllPeerConnections,
+      closePeerConnection,
+      createAndSendOffer,
+      processIceCandidates,
+      scheduleSignalingReconnect,
+      stop,
+    ],
+  )
+
   const start = useCallback(
     async (session: Session) => {
       if (activeRef.current) return
@@ -344,6 +518,9 @@ export function useSender() {
         return
       }
       activeRef.current = true
+      intentionalStopRef.current = false
+      sessionRef.current = session
+      reconnectAttemptRef.current = 0
 
       const generation = generationRef.current + 1
       generationRef.current = generation
@@ -382,82 +559,7 @@ export function useSender() {
         setHasMedia(true)
         if (generationRef.current !== generation) return
 
-        const socket = new WebSocket(socketUrl("send", session))
-        socketRef.current = socket
-        socket.onopen = () => {
-          if (socketRef.current === socket) {
-            socket.send(JSON.stringify({ type: "authenticate", key: session.key }))
-            setStatus(infoStatus("正在验证房间访问码..."))
-          }
-        }
-        socket.onmessage = async (event) => {
-          if (socketRef.current !== socket) return
-          const signal = parseServerSignal(event.data)
-          if (!signal) return
-
-          if (signal.type === "authenticated") {
-            rtcConfigurationRef.current = { iceServers: signal.iceServers }
-            setStatus(successStatus(`已加入 ${session.room}，等待接收端...`))
-            return
-          }
-          if (signal.type === "receiver-ready") {
-            await createAndSendOffer(signal.peerId)
-            return
-          }
-          if (signal.type === "peer-left" && signal.role === "recv") {
-            closePeerConnection(signal.peerId)
-            setStatus(
-              peersRef.current.size === 0
-                ? infoStatus("接收端已全部离线，继续等待...")
-                : successStatus(`${peersRef.current.size} 个接收端仍在线`),
-            )
-            return
-          }
-          if (signal.type === "error") {
-            if (signal.code === "PEER_NOT_FOUND" && signal.peerId) {
-              closePeerConnection(signal.peerId)
-            }
-            setStatus(errorStatus(`连接服务返回错误：${signal.message}`))
-            return
-          }
-
-          if ("sdp" in signal && signal.sdp.type === "answer" && signal.peerId) {
-            const peer = peersRef.current.get(signal.peerId)
-            if (!peer || peer.connection.signalingState !== "have-local-offer") return
-            try {
-              await peer.connection.setRemoteDescription(signal.sdp)
-              await processIceCandidates(signal.peerId, peer)
-              if (peersRef.current.get(signal.peerId) === peer) {
-                setStatus(infoStatus("已收到接收端应答，正在建立连接..."))
-              }
-            } catch {
-              if (peersRef.current.get(signal.peerId) === peer) {
-                closePeerConnection(signal.peerId)
-                setStatus(errorStatus("接收端应答无效，已关闭该连接"))
-              }
-            }
-          } else if ("ice" in signal && signal.peerId) {
-            const peer = peersRef.current.get(signal.peerId)
-            if (!peer) return
-            if (peer.iceCandidates.length >= MAX_PENDING_ICE_CANDIDATES) {
-              closePeerConnection(signal.peerId)
-              setStatus(errorStatus("一个接收端发送了过多连接候选，已关闭该连接"))
-              return
-            }
-            peer.iceCandidates.push(signal.ice)
-            await processIceCandidates(signal.peerId, peer)
-          }
-        }
-        socket.onerror = () => {
-          if (socketRef.current === socket) {
-            setStatus(errorStatus("无法连接信令服务，请检查网络和服务状态"))
-          }
-        }
-        socket.onclose = (event) => {
-          if (socketRef.current !== socket) return
-          stop(senderCloseStatus(event.code))
-        }
-        setStatus(infoStatus("正在连接信令服务..."))
+        connectSocket(session, generation)
       } catch (error) {
         if (generationRef.current !== generation) return
         const name = error instanceof DOMException ? error.name : ""
@@ -472,12 +574,19 @@ export function useSender() {
       }
     },
     [
-      closePeerConnection,
-      createAndSendOffer,
-      processIceCandidates,
+      connectSocket,
       stop,
     ],
   )
+
+  useEffect(() => {
+    connectSocketRef.current = connectSocket
+    return () => {
+      if (connectSocketRef.current === connectSocket) {
+        connectSocketRef.current = null
+      }
+    }
+  }, [connectSocket])
 
   useEffect(() => () => releaseResources(false), [releaseResources])
 

@@ -102,6 +102,7 @@ async fn handle_socket(
     else {
         return;
     };
+    state.metrics.record_authenticated_connection();
     let mut shutdown = state.subscribe_shutdown();
     if *shutdown.borrow() {
         close_socket(&mut socket, 1012, "service restart").await;
@@ -250,6 +251,7 @@ async fn handle_socket(
         let _ = writer.await;
     }
     tracing::info!(%room_id, %peer_id, %role, %ip, "signal peer disconnected");
+    state.metrics.record_disconnected_connection();
 }
 
 async fn authenticate_and_join(

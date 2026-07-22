@@ -1,6 +1,6 @@
 # WebRTC Camera Share
 
-一发多收的浏览器摄像头共享应用。后台使用 Rust + Axum 提供静态资源、健康检查与 WebSocket 信令，前端使用 Vite + React + TypeScript，并只组合 shadcn/ui 原生组件与深色主题。
+一发多收的浏览器摄像头共享应用。后台使用 Rust + Axum 提供静态资源、健康检查与 WebSocket 信令，前端使用 Vite + React + TypeScript，并采用浅色编辑风格的 shadcn/ui 组件。
 
 ## 功能
 
@@ -22,7 +22,7 @@
 
 - 后台：Rust 1.97、Axum、Tokio、Serde、Tower HTTP
 - 前端：Bun、Vite、React 19、TypeScript、Tailwind CSS 4
-- UI：shadcn/ui `base-nova`，固定原生 `dark` 主题
+- UI：shadcn/ui `base-nova`，浅色编辑风格主题
 - 实时通信：WebSocket 信令 + WebRTC 视频传输
 
 ## 目录结构
@@ -97,7 +97,7 @@ cargo xtask build
 
 文件系统模式默认从 `apps/web/dist` 提供前端，也可通过 `WEB_DIST` 指定其他目录。
 
-生产模板使用非 root 应用容器、Caddy HTTPS 和有界端口/配额的 coturn。它们不会自动部署到公网；使用前必须填写独立密钥、域名、证书和公网/私网 IP，并先渲染检查配置：
+生产模板使用非 root 应用容器、Caddy HTTPS 和有界端口/配额的 coturn。它们不会自动部署到公网；使用前必须填写独立密钥、域名、证书和公网/私网 IP，并先渲染检查配置。发布环境优先设置带 digest 的 `APP_IMAGE_REF`，避免可变标签漂移：
 
 ```bash
 cp .env.example .env
@@ -105,7 +105,7 @@ docker compose -f compose.example.yml --env-file .env config
 docker compose -f compose.example.yml --env-file .env up -d --build
 ```
 
-完整的 DNS、防火墙、证书、监控、升级、回滚、事件响应和腾讯云待执行清单见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。当前状态是仓库内生产准备，尚未声称已完成公网部署。
+完整的 DNS、防火墙、证书、监控、升级、回滚、事件响应和腾讯云运行清单见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。当前腾讯云应用已部署并通过健康检查、公网 WebRTC 和 TURN relay 验收；生产镜像标签为 `ui-20260722-03`。
 
 可用环境变量：
 
@@ -138,7 +138,7 @@ TURN_TTL_SECONDS=3600
 
 coturn 需启用 `use-auth-secret`，并把 `static-auth-secret` 配置为相同密钥。后台只会在房间鉴权成功后向该 WebSocket 下发临时凭据；公开的 `/config` 不包含 TURN 密钥或凭据。生产环境还应在 coturn 设置合理的 `user-quota`、`total-quota` 和带宽上限，形成签发端与中继端两层保护。
 
-`/health` 只表示进程存活；`/ready` 还会确认生产前端的 `index.html` 可用；`/metrics` 返回房间、连接、排队信令字节数、限流、TURN 签发拒绝与鉴权拦截等 JSON 指标。配置 `METRICS_TOKEN` 后，请使用 `Authorization: Bearer <token>` 访问指标，缺失或错误的凭据会得到 `401`。容器编排和负载均衡应使用 `/ready` 接收流量，并在外部监控进程 RSS 与 `/metrics` 中的 `queuedSignalBytes`。
+`/health` 只表示进程存活；`/ready` 还会确认生产前端的 `index.html` 可用；`/metrics` 返回房间、连接、排队信令字节数、限流、TURN 签发拒绝、鉴权拦截和累计信令连接/断开等 JSON 指标。配置 `METRICS_TOKEN` 后，请使用 `Authorization: Bearer <token>` 访问指标，缺失或错误的凭据会得到 `401`。容器编排和负载均衡应使用 `/ready` 接收流量，并在外部监控进程 RSS 与 `/metrics` 中的 `queuedSignalBytes`。
 
 ## 验证
 
@@ -164,6 +164,12 @@ python -X utf8 scripts/soak.py --receivers 2 --duration 300 --output target/soak
 ```bash
 cargo xtask release
 cargo xtask smoke -- target/release/webrtc-camera-share-server.exe
+```
+
+TURN relay 必须单独验收，普通本地 E2E 不会把 STUN 连接误报为 TURN 通过。对已配置真实 TURN 的环境运行：
+
+```bash
+TURN_E2E=1 E2E_BASE_URL=https://<app-domain> bun run --cwd apps/web test:e2e -- turn-relay.spec.ts
 ```
 
 Linux 和 macOS 使用不带 `.exe` 的路径。冒烟会在临时回环端口启动二进制，检查存活、就绪、三个页面、运行时配置、指标 401/200、CSP、安全头和静态资源缓存，并始终清理测试进程。

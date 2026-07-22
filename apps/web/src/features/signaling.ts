@@ -10,6 +10,29 @@ const FALLBACK_MAX_RECEIVERS = 8
 const RUNTIME_CONFIG_TIMEOUT_MS = 5_000
 export const MAX_PENDING_ICE_CANDIDATES = 128
 
+export function isRetryableSignalingClose(code: number): boolean {
+  return ![
+    1000,
+    4000,
+    4003,
+    4008,
+    4009,
+    4010,
+    4011,
+    4012,
+    4028,
+    4029,
+    4030,
+  ].includes(code)
+}
+
+export class RuntimeConfigurationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "RuntimeConfigurationError"
+  }
+}
+
 export type RuntimeConfiguration = {
   rtcConfiguration: RTCConfiguration
   maxReceivers: number
@@ -18,13 +41,19 @@ export type RuntimeConfiguration = {
 export function loadRuntimeConfiguration(
   signal?: AbortSignal,
   timeoutMs = RUNTIME_CONFIG_TIMEOUT_MS,
+  options: { allowFallback?: boolean } = {},
 ): Promise<RuntimeConfiguration> {
-  return fetchRuntimeConfiguration(signal, timeoutMs)
+  return fetchRuntimeConfiguration(
+    signal,
+    timeoutMs,
+    options.allowFallback ?? isLoopbackRuntime(),
+  )
 }
 
 async function fetchRuntimeConfiguration(
   externalSignal: AbortSignal | undefined,
   timeoutMs: number,
+  allowFallback: boolean,
 ): Promise<RuntimeConfiguration> {
   const controller = new AbortController()
   const abort = () => controller.abort(externalSignal?.reason)
@@ -62,7 +91,12 @@ async function fetchRuntimeConfiguration(
       rtcConfiguration: { iceServers: iceServers as RTCIceServer[] },
       maxReceivers,
     }
-  } catch {
+  } catch (error) {
+    if (externalSignal?.aborted) throw error
+    if (!allowFallback) {
+      const message = error instanceof Error ? error.message : "未知错误"
+      throw new RuntimeConfigurationError(`无法加载连接配置：${message}`)
+    }
     return {
       rtcConfiguration: fallbackRtcConfiguration,
       maxReceivers: FALLBACK_MAX_RECEIVERS,
@@ -71,6 +105,13 @@ async function fetchRuntimeConfiguration(
     clearTimeout(timeout)
     externalSignal?.removeEventListener("abort", abort)
   }
+}
+
+function isLoopbackRuntime(): boolean {
+  if (typeof window === "undefined") return false
+  return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(
+    window.location.hostname,
+  )
 }
 
 function parseIceServer(value: unknown): RTCIceServer | undefined {

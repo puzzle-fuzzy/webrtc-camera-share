@@ -10,6 +10,8 @@ pub struct ServerMetrics {
     rate_limited_connections: AtomicU64,
     routed_signals: AtomicU64,
     turn_credential_rejections: AtomicU64,
+    authenticated_connections: AtomicU64,
+    disconnected_connections: AtomicU64,
 }
 
 impl ServerMetrics {
@@ -51,6 +53,16 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_authenticated_connection(&self) {
+        self.authenticated_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_disconnected_connection(&self) {
+        self.disconnected_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn authentication_failures(&self) -> u64 {
         self.authentication_failures.load(Ordering::Relaxed)
     }
@@ -81,5 +93,13 @@ impl ServerMetrics {
 
     pub fn turn_credential_rejections(&self) -> u64 {
         self.turn_credential_rejections.load(Ordering::Relaxed)
+    }
+
+    pub fn authenticated_connections(&self) -> u64 {
+        self.authenticated_connections.load(Ordering::Relaxed)
+    }
+
+    pub fn disconnected_connections(&self) -> u64 {
+        self.disconnected_connections.load(Ordering::Relaxed)
     }
 }

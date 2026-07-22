@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
-import { loadRuntimeConfiguration, parseServerSignal } from "./signaling"
+import {
+  loadRuntimeConfiguration,
+  parseServerSignal,
+  RuntimeConfigurationError,
+} from "./signaling"
 
 const originalFetch = globalThis.fetch
 
@@ -40,7 +44,7 @@ describe("signaling", () => {
     expect(parseServerSignal(new Uint8Array())).toBeUndefined()
   })
 
-  test("falls back when runtime configuration times out", async () => {
+  test("allows the development fallback only when explicitly enabled", async () => {
     globalThis.fetch = ((_input, init) =>
       new Promise((_resolve, reject) => {
         init?.signal?.addEventListener(
@@ -50,10 +54,21 @@ describe("signaling", () => {
         )
       })) as typeof fetch
 
-    const configuration = await loadRuntimeConfiguration(undefined, 1)
+    const configuration = await loadRuntimeConfiguration(undefined, 1, {
+      allowFallback: true,
+    })
 
     expect(configuration.maxReceivers).toBe(8)
     expect(configuration.rtcConfiguration.iceServers).toHaveLength(3)
+  })
+
+  test("fails closed when production configuration is unavailable", async () => {
+    globalThis.fetch = (() =>
+      Promise.reject(new Error("network down"))) as unknown as typeof fetch
+
+    await expect(
+      loadRuntimeConfiguration(undefined, 1, { allowFallback: false }),
+    ).rejects.toBeInstanceOf(RuntimeConfigurationError)
   })
 
   test("honors a caller cancellation", async () => {
@@ -71,8 +86,8 @@ describe("signaling", () => {
     const controller = new AbortController()
     controller.abort()
 
-    const configuration = await loadRuntimeConfiguration(controller.signal)
-
-    expect(configuration.maxReceivers).toBe(8)
+    await expect(
+      loadRuntimeConfiguration(controller.signal, 1, { allowFallback: true }),
+    ).rejects.toThrow()
   })
 })

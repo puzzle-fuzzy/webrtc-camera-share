@@ -14,11 +14,14 @@ import {
 import {
   loadRuntimeConfiguration,
   MAX_PENDING_ICE_CANDIDATES,
+  isRetryableSignalingClose,
   parseServerSignal,
 } from "@/features/signaling"
 import { socketUrl, type Session } from "@/features/session"
 
 const ICE_RECOVERY_TIMEOUT_MS = 25_000
+const MAX_SIGNALING_RECONNECT_ATTEMPTS = 5
+const SIGNALING_RECONNECT_BASE_MS = 1_000
 
 export function useReceiver() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -32,6 +35,13 @@ export function useReceiver() {
   const generationRef = useRef(0)
   const activeRef = useRef(false)
   const maxReceiversRef = useRef(8)
+  const sessionRef = useRef<Session | null>(null)
+  const intentionalStopRef = useRef(true)
+  const reconnectTimerRef = useRef<number | null>(null)
+  const reconnectAttemptRef = useRef(0)
+  const connectSocketRef = useRef<
+    ((session: Session, generation: number) => void) | null
+  >(null)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState<ConnectionStatus>(() =>
     infoStatus("输入房间信息或使用发送端分享链接"),
@@ -68,6 +78,12 @@ export function useReceiver() {
     (updateState: boolean) => {
       generationRef.current += 1
       activeRef.current = false
+      intentionalStopRef.current = true
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
+      reconnectAttemptRef.current = 0
       configControllerRef.current?.abort()
       configControllerRef.current = null
       const socket = socketRef.current
@@ -81,10 +97,54 @@ export function useReceiver() {
 
   const stop = useCallback(
     (nextStatus: ConnectionStatus = infoStatus("已停止接收")) => {
+      intentionalStopRef.current = true
       releaseResources(true)
       setStatus(nextStatus)
     },
     [releaseResources],
+  )
+
+  const scheduleSignalingReconnect = useCallback(
+    (generation: number) => {
+      if (
+        intentionalStopRef.current ||
+        !activeRef.current ||
+        generationRef.current !== generation ||
+        reconnectTimerRef.current !== null
+      ) {
+        return
+      }
+
+      const attempt = reconnectAttemptRef.current + 1
+      if (attempt > MAX_SIGNALING_RECONNECT_ATTEMPTS) {
+        stop(errorStatus("信令服务多次重连失败，请检查网络后重试"))
+        return
+      }
+
+      reconnectAttemptRef.current = attempt
+      const delay = Math.min(
+        SIGNALING_RECONNECT_BASE_MS * 2 ** (attempt - 1),
+        30_000,
+      )
+      setStatus(
+        infoStatus(
+          `信令连接已断开，将在 ${Math.ceil(delay / 1000)} 秒后重连（${attempt}/${MAX_SIGNALING_RECONNECT_ATTEMPTS}）`,
+        ),
+      )
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null
+        if (
+          intentionalStopRef.current ||
+          !activeRef.current ||
+          generationRef.current !== generation
+        ) {
+          return
+        }
+        const session = sessionRef.current
+        if (session) connectSocketRef.current?.(session, generation)
+      }, delay)
+    },
+    [stop],
   )
 
   const sendSignal = useCallback((signal: unknown) => {
@@ -207,49 +267,39 @@ export function useReceiver() {
     [closePeerConnection, createPeerConnection, processIceCandidates, sendSignal],
   )
 
-  const start = useCallback(
-    async (session: Session) => {
-      if (activeRef.current) return
-      const environmentIssue = receiverEnvironmentIssue(
-        currentBrowserEnvironment(),
-      )
-      if (environmentIssue) {
-        setStatus(environmentIssue)
+  const connectSocket = useCallback(
+    (session: Session, generation: number) => {
+      if (
+        intentionalStopRef.current ||
+        !activeRef.current ||
+        generationRef.current !== generation
+      ) {
         return
       }
-      activeRef.current = true
-
-      const generation = generationRef.current + 1
-      generationRef.current = generation
-      setRunning(true)
-      setStatus(infoStatus("正在加载连接配置..."))
-      if (videoRef.current) videoRef.current.muted = true
-
-      const configController = new AbortController()
-      configControllerRef.current = configController
-      const runtimeConfiguration = await loadRuntimeConfiguration(
-        configController.signal,
-      )
-      if (configControllerRef.current === configController) {
-        configControllerRef.current = null
-      }
-      if (generationRef.current !== generation) return
-      rtcConfigurationRef.current = runtimeConfiguration.rtcConfiguration
-      maxReceiversRef.current = runtimeConfiguration.maxReceivers
 
       const socket = new WebSocket(socketUrl("recv", session))
       socketRef.current = socket
       socket.onopen = () => {
-        if (socketRef.current !== socket || generationRef.current !== generation) return
-        socket.send(JSON.stringify({ type: "authenticate", key: session.key }))
-        setStatus(infoStatus("正在验证房间访问码..."))
+        if (
+          socketRef.current === socket &&
+          generationRef.current === generation
+        ) {
+          socket.send(JSON.stringify({ type: "authenticate", key: session.key }))
+          setStatus(infoStatus("正在验证房间访问码..."))
+        }
       }
       socket.onmessage = async (event) => {
-        if (socketRef.current !== socket) return
+        if (
+          socketRef.current !== socket ||
+          generationRef.current !== generation
+        ) {
+          return
+        }
         const signal = parseServerSignal(event.data)
         if (!signal) return
 
         if (signal.type === "authenticated") {
+          reconnectAttemptRef.current = 0
           rtcConfigurationRef.current = { iceServers: signal.iceServers }
           maxReceiversRef.current = signal.maxReceivers
           setStatus(successStatus(`已加入 ${session.room}，等待发送端...`))
@@ -280,12 +330,18 @@ export function useReceiver() {
       }
       socket.onerror = () => {
         if (socketRef.current === socket) {
-          setStatus(errorStatus("无法连接信令服务，请检查网络和服务状态"))
+          setStatus(infoStatus("信令连接中断，正在准备恢复..."))
         }
       }
       socket.onclose = (event) => {
         if (socketRef.current !== socket) return
-        stop(receiverCloseStatus(event.code, maxReceiversRef.current))
+        if (!isRetryableSignalingClose(event.code)) {
+          stop(receiverCloseStatus(event.code, maxReceiversRef.current))
+          return
+        }
+        socketRef.current = null
+        closePeerConnection()
+        scheduleSignalingReconnect(generation)
       }
       setStatus(infoStatus("正在连接信令服务..."))
     },
@@ -293,10 +349,71 @@ export function useReceiver() {
       closePeerConnection,
       handleOffer,
       processIceCandidates,
+      scheduleSignalingReconnect,
       sendSignal,
       stop,
     ],
   )
+
+  const start = useCallback(
+    async (session: Session) => {
+      if (activeRef.current) return
+      const environmentIssue = receiverEnvironmentIssue(
+        currentBrowserEnvironment(),
+      )
+      if (environmentIssue) {
+        setStatus(environmentIssue)
+        return
+      }
+      activeRef.current = true
+      intentionalStopRef.current = false
+      sessionRef.current = session
+      reconnectAttemptRef.current = 0
+
+      const generation = generationRef.current + 1
+      generationRef.current = generation
+      setRunning(true)
+      setStatus(infoStatus("正在加载连接配置..."))
+      if (videoRef.current) videoRef.current.muted = true
+
+      const configController = new AbortController()
+      configControllerRef.current = configController
+      let runtimeConfiguration: Awaited<
+        ReturnType<typeof loadRuntimeConfiguration>
+      >
+      try {
+        runtimeConfiguration = await loadRuntimeConfiguration(
+          configController.signal,
+        )
+      } catch (error) {
+        if (generationRef.current !== generation) return
+        const message = error instanceof Error ? error.message : String(error)
+        stop(errorStatus(message))
+        return
+      }
+      if (configControllerRef.current === configController) {
+        configControllerRef.current = null
+      }
+      if (generationRef.current !== generation) return
+      rtcConfigurationRef.current = runtimeConfiguration.rtcConfiguration
+      maxReceiversRef.current = runtimeConfiguration.maxReceivers
+
+      connectSocket(session, generation)
+    },
+    [
+      connectSocket,
+      stop,
+    ],
+  )
+
+  useEffect(() => {
+    connectSocketRef.current = connectSocket
+    return () => {
+      if (connectSocketRef.current === connectSocket) {
+        connectSocketRef.current = null
+      }
+    }
+  }, [connectSocket])
 
   useEffect(() => () => releaseResources(false), [releaseResources])
 

@@ -1,6 +1,6 @@
 # Production Deployment Runbook
 
-本文档描述仓库已准备好的生产部署流程。它尚未表示任何公网环境已经上线：腾讯云服务器、DNS、证书、防火墙、TURN 和监控必须等用户提供服务器连接后再执行和验证。
+本文档描述仓库内可重复的生产部署流程。公网环境是否上线以发布记录和现场验收证据为准；腾讯云服务器、DNS、证书、防火墙、TURN 和监控必须逐项核对。
 
 ## 1. 拓扑与边界
 
@@ -8,7 +8,7 @@
 flowchart LR
     Browser["发送端 / 接收端浏览器"] -->|"HTTPS + WSS :443"| Caddy["Caddy TLS 终止"]
     Caddy -->|"HTTP :5011，仅容器网络"| App["Rust 单二进制应用"]
-    Browser -.->|"STUN/TURN :3478/:5349\nRelay UDP 49160-49200"| Coturn["coturn"]
+    Browser -.->|"STUN/TURN configured ports\nRelay configured UDP range"| Coturn["coturn"]
     App -->|"鉴权后签发临时 TURN 凭据"| Browser
 ```
 
@@ -31,9 +31,9 @@ flowchart LR
 | 80 | TCP | ACME HTTP challenge 与 HTTPS 跳转 |
 | 443 | TCP | HTTPS 与 WebSocket |
 | 443 | UDP | Caddy HTTP/3，可按策略关闭 |
-| 3478 | TCP/UDP | STUN/TURN |
-| 5349 | TCP | TURN over TLS |
-| 49160–49200 | UDP | coturn 有界媒体 relay 端口 |
+| `TURN_LISTENING_PORT`（默认 3478） | TCP/UDP | STUN/TURN |
+| `TURN_TLS_PORT`（默认 5349） | TCP | TURN over TLS |
+| `TURN_MIN_PORT`–`TURN_MAX_PORT`（默认 49160–49200） | UDP | coturn 有界媒体 relay 端口 |
 
 不要把应用的 5011 端口暴露到公网。SSH 管理端口只允许可信源地址；公网管理策略在腾讯云执行阶段单独确认。
 
@@ -63,7 +63,7 @@ docker compose -f compose.example.yml --env-file .env up -d
 docker compose -f compose.example.yml --env-file .env ps
 ```
 
-模板使用固定的 Bun 1.3.14、Rust 1.97.0、Caddy 2.11.4 和 coturn 4.14.0-r0 标签。升级镜像前阅读上游发行说明，并在测试环境重新执行浏览器 E2E、冒烟和 TURN relay 验收。
+模板使用固定的 Bun 1.3.14、Rust 1.97.0、Caddy 2.11.4 和 coturn 4.14.0-r0 标签；端口由 `.env` 统一注入。升级镜像前阅读上游发行说明，并在测试环境重新执行浏览器 E2E、冒烟和 TURN relay 验收。
 
 ## 6. 首次验收
 
@@ -90,6 +90,14 @@ curl --fail --silent --show-error \
 
 只看到 `host` 或 `srflx` candidate 不算 TURN 验收成功。
 
+仓库还提供了显式的 relay gate。它不会在普通本地 E2E 中伪装成 TURN 验收，必须对已配置 TURN 的环境运行：
+
+```bash
+TURN_E2E=1 E2E_BASE_URL=https://<app-domain> bun run --cwd apps/web test:e2e -- turn-relay.spec.ts
+```
+
+该测试通过浏览器的 `iceTransportPolicy=relay` 强制媒体只走中继，并检查选中的 candidate pair 的本地与远端类型都为 `relay`。测试输出、接收链接和临时凭据不得提交到仓库。
+
 ## 7. 监控与告警
 
 外部探针每 30 秒检查 `/health` 和 `/ready`。`/metrics` 必须携带 Bearer Token，并至少采集：
@@ -99,6 +107,7 @@ curl --fail --silent --show-error \
 - `outboundOverloads`、`rateLimitedConnections`、`connectionRejections` 增量；
 - `authenticationFailures`、`authenticationBlocks` 异常增长；
 - `turnCredentialRejections` 增量；
+- `authenticatedConnections` 与 `disconnectedConnections` 的差值和增长趋势，用于识别信令反复重连；
 - 进程/容器 CPU、RSS、重启次数、文件描述符和主机网络流量；
 - coturn allocation 数、拒绝、relay 带宽、丢包和端口池使用率。
 
@@ -117,7 +126,7 @@ docker compose -f compose.example.yml --env-file .env logs --since=30m app caddy
 按以下顺序检查，避免先修改 WebRTC 客户端：
 
 1. DNS 是否解析到正确公网地址，证书 SAN 是否包含 `TURN_DOMAIN`；
-2. 3478 TCP/UDP、5349 TCP、49160–49200 UDP 是否同时通过云安全组与主机防火墙；
+2. `.env` 中的 TURN 监听、TLS 和 relay 端口范围是否同时通过云安全组与主机防火墙；
 3. `TURN_EXTERNAL_IP` 是否符合公网直连或 `PUBLIC_IP/PRIVATE_IP` 映射；
 4. 应用和 coturn 的 `TURN_SHARED_SECRET` 是否一致，主机时间是否同步；
 5. coturn 健康检查、allocation 日志、配额和带宽是否正常；
@@ -138,7 +147,7 @@ cargo xtask release
 cargo xtask smoke -- target/release/webrtc-camera-share-server
 ```
 
-soak 输出中的 `summary.json` 必须保持脱敏，只用于核对连接状态、服务计数和 RTCStats；不要把生产密钥作为命令参数或写入测试制品。Compose 部署使用新的不可变 `APP_IMAGE_TAG` 构建，不要覆盖仍在回滚窗口内的旧标签。启动后验证 `/ready`、受保护指标、一个真实 WebRTC 会话和 TURN relay，再清理旧镜像。
+soak 输出中的 `summary.json` 必须保持脱敏，只用于核对连接状态、服务计数和 RTCStats；不要把生产密钥作为命令参数或写入测试制品。Compose 部署应优先使用不可变的 `APP_IMAGE_REF`（例如带 digest 的 registry 引用）；没有 registry 时才使用唯一且不可复用的 `APP_IMAGE_TAG`，不要覆盖仍在回滚窗口内的旧标签。启动后验证 `/ready`、受保护指标、一个真实 WebRTC 会话和 TURN relay，再清理旧镜像。
 
 回滚时恢复上一镜像标签和对应环境配置，运行 `docker compose ... up -d`，再重复健康、指标和会话验收。服务没有数据库或持久化房间，因此没有业务数据备份；需要备份的是加密存储中的密钥、证书续期配置、部署清单、告警规则和发布制品校验值。
 
@@ -163,7 +172,7 @@ sudo -u webrtc-camera-share /usr/local/bin/webrtc-camera-share-server --healthch
 
 `app.env` 只包含应用支持的变量：`HOST=127.0.0.1`、`PORT=5011`、容量、Origin、指标和 TURN 配置。Caddy 与 coturn 仍需各自的受管服务、证书和防火墙策略。
 
-## 13. 腾讯云待执行清单
+## 13. 腾讯云运行记录与后续清单
 
 收到服务器连接后再执行以下动作，并逐项保留命令与证据：
 
@@ -176,4 +185,4 @@ sudo -u webrtc-camera-share /usr/local/bin/webrtc-camera-share-server --healthch
 - 执行短时 1/2/4/8 接收端验证与长稳测试；
 - 接入监控与告警，记录最终版本、端口、域名、证书到期和回滚命令。
 
-在这些步骤完成前，项目状态应表述为“仓库内生产准备完成，公网部署待服务器访问”，不能称为已上线。
+本次部署已完成应用镜像切换、健康检查、受保护指标检查、公网发送/接收 E2E 和强制 TURN relay 验收。当前应用镜像标签为 `ui-20260722-03`，上一版本和 `.env` 备份仍保留用于回滚。后续仍应接入长期监控、执行长时间 soak，并把镜像发布迁移到带 digest 的制品流程。

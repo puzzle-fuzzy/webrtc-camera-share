@@ -19,12 +19,18 @@ export function VideoStage({
   ...videoProps
 }: VideoStageProps) {
   return (
-    <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-black ring-1 ring-foreground/10">
+    <div className="video-stage">
+      <div className="video-stage-meta" aria-hidden="true">
+        <span>LIVE VIEW / 16:9</span>
+        <span className={cn("video-stage-signal", hasMedia && "is-live")}>
+          {hasMedia ? "SIGNAL LOCKED" : "NO SIGNAL"}
+        </span>
+      </div>
       <video
         ref={videoRef}
         aria-label={label}
         className={cn(
-          "absolute inset-0 size-full bg-black object-contain transition-opacity motion-reduce:transition-none",
+          "video-stage-media absolute inset-0 size-full bg-black object-contain transition-opacity motion-reduce:transition-none",
           hasMedia ? "opacity-100" : "pointer-events-none opacity-0",
           className,
         )}
@@ -33,12 +39,13 @@ export function VideoStage({
       {!hasMedia && (
         <div
           className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground"
-          aria-hidden="true"
+          aria-live="polite"
         >
-          <VideoIcon className="size-5" />
+          <VideoIcon className="size-5" aria-hidden="true" />
           <p className="max-w-sm text-balance">{placeholder}</p>
         </div>
       )}
+      <div className="video-stage-mark" aria-hidden="true">CAMERA / 01</div>
     </div>
   )
 }

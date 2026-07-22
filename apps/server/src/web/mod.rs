@@ -166,6 +166,8 @@ struct MetricsResponse {
     authentication_failures: u64,
     authentication_blocks: u64,
     turn_credential_rejections: u64,
+    authenticated_connections: u64,
+    disconnected_connections: u64,
 }
 
 pub fn build_app(state: AppState, web_dist: PathBuf) -> Router {
@@ -239,6 +241,8 @@ async fn metrics(State(state): State<HttpState>, headers: HeaderMap) -> Response
         authentication_failures: state.app.metrics.authentication_failures(),
         authentication_blocks: state.app.metrics.authentication_blocks(),
         turn_credential_rejections: state.app.metrics.turn_credential_rejections(),
+        authenticated_connections: state.app.metrics.authenticated_connections(),
+        disconnected_connections: state.app.metrics.disconnected_connections(),
     })
     .into_response()
 }

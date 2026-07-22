@@ -2,7 +2,7 @@ name: webrtc-camera-share
 
 services:
   app:
-    image: webrtc-camera-share:${APP_IMAGE_TAG:-local}
+    image: ${APP_IMAGE_REF:-webrtc-camera-share:${APP_IMAGE_TAG:-local}}
     build:
       context: .
       dockerfile: Dockerfile
@@ -14,8 +14,8 @@ services:
       TRUST_PROXY: "true"
       ALLOWED_ORIGINS_JSON: '["https://${APP_DOMAIN:?Set APP_DOMAIN in .env}"]'
       METRICS_TOKEN: ${METRICS_TOKEN:?Set METRICS_TOKEN in .env}
-      ICE_SERVERS_JSON: '[{"urls":"stun:${TURN_DOMAIN:?Set TURN_DOMAIN in .env}:3478"}]'
-      TURN_URLS_JSON: '["turn:${TURN_DOMAIN}:3478?transport=udp","turn:${TURN_DOMAIN}:3478?transport=tcp","turns:${TURN_DOMAIN}:5349?transport=tcp"]'
+      ICE_SERVERS_JSON: '[{"urls":"stun:${TURN_DOMAIN:?Set TURN_DOMAIN in .env}:${TURN_LISTENING_PORT:-3478}"}]'
+      TURN_URLS_JSON: '["turn:${TURN_DOMAIN}:${TURN_LISTENING_PORT:-3478}?transport=udp","turn:${TURN_DOMAIN}:${TURN_LISTENING_PORT:-3478}?transport=tcp","turns:${TURN_DOMAIN}:${TURN_TLS_PORT:-5349}?transport=tcp"]'
       TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET in .env}
       MAX_CONNECTIONS: ${MAX_CONNECTIONS:-256}
       MAX_CONNECTIONS_PER_IP: ${MAX_CONNECTIONS_PER_IP:-32}
@@ -74,6 +74,10 @@ services:
       - --server-name=${TURN_DOMAIN}
       - --external-ip=${TURN_EXTERNAL_IP:?Set TURN_EXTERNAL_IP in .env}
       - --static-auth-secret=${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET in .env}
+      - --listening-port=${TURN_LISTENING_PORT:-3478}
+      - --tls-listening-port=${TURN_TLS_PORT:-5349}
+      - --min-port=${TURN_MIN_PORT:-49160}
+      - --max-port=${TURN_MAX_PORT:-49200}
       - --cert=/run/secrets/turn-cert.pem
       - --pkey=/run/secrets/turn-key.pem
     volumes:
@@ -81,7 +85,7 @@ services:
       - ${TURN_CERT_FILE:?Set TURN_CERT_FILE in .env}:/run/secrets/turn-cert.pem:ro
       - ${TURN_KEY_FILE:?Set TURN_KEY_FILE in .env}:/run/secrets/turn-key.pem:ro
     healthcheck:
-      test: ["CMD", "turnutils_stunclient", "-p", "3478", "127.0.0.1"]
+      test: ["CMD", "turnutils_stunclient", "-p", "${TURN_LISTENING_PORT:-3478}", "127.0.0.1"]
       interval: 30s
       timeout: 5s
       retries: 3

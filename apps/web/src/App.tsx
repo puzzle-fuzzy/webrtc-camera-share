@@ -14,6 +14,19 @@ function App() {
     document.title = "关于 · 摄像头共享"
     return <AboutPage />
   }
+  if (!["/", "/send", "/send.html"].includes(window.location.pathname)) {
+    document.title = "页面不存在 · 摄像头共享"
+    return (
+      <main className="editorial-shell editorial-not-found">
+        <div className="editorial-content">
+          <p className="editorial-section-label">404 / NOT FOUND</p>
+          <h1 className="editorial-title">页面不存在</h1>
+          <p className="editorial-deck">这个地址没有对应的共享页面，请返回发送端或打开接收端链接。</p>
+          <a className="editorial-not-found-link" href="/">返回发送端</a>
+        </div>
+      </main>
+    )
+  }
   document.title = "发送端 · 摄像头共享"
   return <SenderPage />
 }

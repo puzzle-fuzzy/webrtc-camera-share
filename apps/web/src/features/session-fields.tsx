@@ -21,7 +21,7 @@ export function SessionFields({
   const keyErrorId = "access-code-error"
 
   return (
-    <FieldGroup className="grid gap-4 md:grid-cols-2">
+    <FieldGroup className="session-fields grid gap-4 md:grid-cols-2">
       <Field data-disabled={disabled || undefined} data-invalid={roomInvalid || undefined}>
         <FieldLabel htmlFor="room">房间 ID</FieldLabel>
         <Input
@@ -37,6 +37,7 @@ export function SessionFields({
           required
           spellCheck={false}
           placeholder="例如 demo-room"
+          className="editorial-input"
         />
         {roomInvalid && <FieldError id={roomErrorId}>{issue.message}</FieldError>}
       </Field>
@@ -56,6 +57,7 @@ export function SessionFields({
           maxLength={32}
           required
           placeholder="6 到 32 位字母或数字"
+          className="editorial-input"
         />
         {keyInvalid && <FieldError id={keyErrorId}>{issue.message}</FieldError>}
       </Field>

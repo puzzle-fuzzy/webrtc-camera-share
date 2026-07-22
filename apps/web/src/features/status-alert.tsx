@@ -14,8 +14,10 @@ export function StatusAlert({ status }: StatusAlertProps) {
       variant={destructive ? "destructive" : "default"}
       role={destructive ? "alert" : "status"}
       aria-live={destructive ? undefined : "polite"}
+      data-status-tone={status.tone}
+      className="editorial-status"
     >
-      <RadioIcon />
+      <RadioIcon aria-hidden="true" />
       <AlertTitle>连接状态</AlertTitle>
       <AlertDescription>{status.message}</AlertDescription>
     </Alert>
