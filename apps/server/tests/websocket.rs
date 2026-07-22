@@ -5,7 +5,9 @@ use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{Error, Message, protocol::CloseFrame},
+    tungstenite::{
+        Error, Message, client::IntoClientRequest, http::HeaderValue, protocol::CloseFrame,
+    },
 };
 use webrtc_camera_share_server::{AppState, ResourceLimits, build_app};
 
@@ -24,12 +26,16 @@ impl Drop for TestServer {
 
 impl TestServer {
     async fn start(limits: ResourceLimits) -> Self {
+        Self::start_with_origins(limits, Vec::new()).await
+    }
+
+    async fn start_with_origins(limits: ResourceLimits, origins: Vec<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
         let address = listener.local_addr().expect("test server address");
         let app = build_app(
-            AppState::new(limits, Vec::new(), None, false),
+            AppState::new(limits, Vec::new(), None, false).with_security(origins, None),
             PathBuf::from("missing-test-dist"),
         );
         let task = tokio::spawn(async move {
@@ -46,6 +52,21 @@ impl TestServer {
     async fn connect(&self, role: &str, room: &str) -> ClientSocket {
         let url = format!("ws://{}/ws?role={role}&room={room}", self.address);
         connect_async(url).await.expect("connect websocket").0
+    }
+
+    async fn connect_with_origin(
+        &self,
+        role: &str,
+        room: &str,
+        origin: &str,
+    ) -> Result<ClientSocket, Error> {
+        let url = format!("ws://{}/ws?role={role}&room={room}", self.address);
+        let mut request = url.into_client_request().expect("websocket request");
+        request.headers_mut().insert(
+            "origin",
+            HeaderValue::from_str(origin).expect("valid origin header"),
+        );
+        connect_async(request).await.map(|(socket, _)| socket)
     }
 }
 
@@ -92,6 +113,46 @@ async fn next_close(socket: &mut ClientSocket) -> CloseFrame {
             other => panic!("expected close message, got {other:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn enforces_browser_origin_without_breaking_non_browser_clients() {
+    let server = TestServer::start(ResourceLimits::default()).await;
+
+    let no_origin = server.connect("recv", "no-origin-room").await;
+    drop(no_origin);
+
+    let same_origin = format!("http://{}", server.address);
+    let socket = server
+        .connect_with_origin("recv", "same-origin-room", &same_origin)
+        .await
+        .expect("same-origin websocket");
+    drop(socket);
+
+    for origin in ["null", "https://cross-origin.example"] {
+        let error = server
+            .connect_with_origin("recv", "rejected-origin-room", origin)
+            .await
+            .expect_err("origin must be rejected");
+        match error {
+            Error::Http(response) => assert_eq!(response.status(), 403),
+            other => panic!("expected HTTP rejection, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn accepts_an_explicitly_configured_browser_origin() {
+    let server = TestServer::start_with_origins(
+        ResourceLimits::default(),
+        vec!["https://viewer.example".to_owned()],
+    )
+    .await;
+    let socket = server
+        .connect_with_origin("recv", "configured-origin-room", "https://viewer.example")
+        .await
+        .expect("configured browser origin");
+    drop(socket);
 }
 
 #[tokio::test]

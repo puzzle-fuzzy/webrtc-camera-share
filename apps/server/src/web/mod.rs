@@ -11,12 +11,13 @@ use std::{
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header::WWW_AUTHENTICATE},
     middleware,
     response::{IntoResponse, Response},
     routing::get,
 };
 use serde::Serialize;
+use subtle::ConstantTimeEq;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -40,6 +41,8 @@ pub struct AppState {
     metrics: Arc<ServerMetrics>,
     max_receivers: usize,
     trust_proxy: bool,
+    allowed_origins: Arc<Vec<String>>,
+    metrics_token: Option<Arc<String>>,
 }
 
 impl AppState {
@@ -65,7 +68,19 @@ impl AppState {
             metrics: Arc::new(ServerMetrics::default()),
             max_receivers: limits.max_receivers,
             trust_proxy,
+            allowed_origins: Arc::new(Vec::new()),
+            metrics_token: None,
         }
+    }
+
+    pub fn with_security(
+        mut self,
+        allowed_origins: Vec<String>,
+        metrics_token: Option<String>,
+    ) -> Self {
+        self.allowed_origins = Arc::new(allowed_origins);
+        self.metrics_token = metrics_token.map(Arc::new);
+        self
     }
 
     fn disconnect_overloaded_peer(&self, peer: &PeerSender) {
@@ -193,7 +208,12 @@ async fn runtime_config(State(state): State<HttpState>) -> Json<RuntimeConfigRes
     })
 }
 
-async fn metrics(State(state): State<HttpState>) -> Json<MetricsResponse> {
+async fn metrics(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Some(token) = &state.app.metrics_token
+        && !metrics_token_matches(&headers, token)
+    {
+        return (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, "Bearer")]).into_response();
+    }
     let rooms = state.app.rooms.lock().expect("room registry lock poisoned");
     Json(MetricsResponse {
         rooms: rooms.room_count(),
@@ -208,6 +228,25 @@ async fn metrics(State(state): State<HttpState>) -> Json<MetricsResponse> {
         authentication_blocks: state.app.metrics.authentication_blocks(),
         turn_credential_rejections: state.app.metrics.turn_credential_rejections(),
     })
+    .into_response()
+}
+
+fn metrics_token_matches(headers: &HeaderMap, expected: &str) -> bool {
+    let mut values = headers.get_all("authorization").iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let Some((scheme, candidate)) = value.split_once(' ') else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("bearer")
+        && bool::from(expected.as_bytes().ct_eq(candidate.as_bytes()))
 }
 
 #[cfg(test)]
@@ -233,6 +272,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
         assert!(response.headers().contains_key("x-request-id"));
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        );
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("health body");
@@ -257,6 +300,44 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         };
         assert_eq!(response.status(), expected);
+    }
+
+    #[tokio::test]
+    async fn protects_metrics_with_an_optional_bearer_token() {
+        let token = "0123456789abcdef";
+        let app = build_app(
+            AppState::default().with_security(Vec::new(), Some(token.to_owned())),
+            PathBuf::from("missing-dist"),
+        );
+        let request = |authorization: Option<&str>| {
+            let mut request = Request::builder().uri("/metrics");
+            if let Some(authorization) = authorization {
+                request = request.header("authorization", authorization);
+            }
+            request.body(Body::empty()).expect("request")
+        };
+
+        for authorization in [None, Some("Bearer wrong-token")] {
+            let response = app
+                .clone()
+                .oneshot(request(authorization))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()["www-authenticate"], "Bearer");
+        }
+
+        let response = app
+            .oneshot(request(Some("Bearer 0123456789abcdef")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("metrics body");
+        let metrics: Value = serde_json::from_slice(&body).expect("metrics JSON");
+        assert_eq!(metrics["rooms"], 0);
+        assert_eq!(metrics["connections"], 0);
     }
 
     #[cfg(not(feature = "embed-web"))]

@@ -29,7 +29,10 @@ use crate::{
     infrastructure::limits::{ConnectionLease, SignalBudget},
 };
 
-use super::{AppState, HttpState, security::client_ip};
+use super::{
+    AppState, HttpState,
+    security::{client_ip, origin_allowed},
+};
 
 const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
@@ -58,6 +61,9 @@ pub(super) async fn websocket(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    if !origin_allowed(&headers, &state.app.allowed_origins) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(room_id) = normalize_room_id(&params.room) else {
         return StatusCode::BAD_REQUEST.into_response();
     };

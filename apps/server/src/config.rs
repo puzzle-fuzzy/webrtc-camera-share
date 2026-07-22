@@ -1,10 +1,12 @@
 use std::{
+    collections::HashSet,
     env,
     net::SocketAddr,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use axum::http::Uri;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -107,6 +109,8 @@ pub struct Config {
     pub ice_servers: Vec<IceServerConfig>,
     pub turn: Option<TurnConfig>,
     pub trust_proxy: bool,
+    pub allowed_origins: Vec<String>,
+    pub metrics_token: Option<String>,
 }
 
 impl Config {
@@ -141,6 +145,9 @@ impl Config {
             return Err("MAX_ROOMS 不能大于 MAX_CONNECTIONS".to_owned());
         }
 
+        let allowed_origins = env::var("ALLOWED_ORIGINS_JSON").ok();
+        let metrics_token = env::var("METRICS_TOKEN").ok();
+
         Ok(Self {
             address,
             web_dist: resolve_web_dist()?,
@@ -148,8 +155,81 @@ impl Config {
             ice_servers: parse_ice_servers()?,
             turn: parse_turn_config()?,
             trust_proxy: parse_bool("TRUST_PROXY", false)?,
+            allowed_origins: parse_allowed_origins(allowed_origins.as_deref())?,
+            metrics_token: parse_metrics_token(metrics_token.as_deref())?,
         })
     }
+}
+
+fn parse_allowed_origins(value: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let origins = serde_json::from_str::<Vec<String>>(value)
+        .map_err(|error| format!("ALLOWED_ORIGINS_JSON 格式无效：{error}"))?;
+    if origins.is_empty() {
+        return Err("ALLOWED_ORIGINS_JSON 至少需要一个 origin".to_owned());
+    }
+
+    let mut normalized = Vec::with_capacity(origins.len());
+    let mut unique = HashSet::with_capacity(origins.len());
+    for origin in origins {
+        let origin = normalize_origin(&origin)?;
+        if !unique.insert(origin.clone()) {
+            return Err(format!("ALLOWED_ORIGINS_JSON 包含重复 origin：{origin}"));
+        }
+        normalized.push(origin);
+    }
+    Ok(normalized)
+}
+
+pub(crate) fn normalize_origin(value: &str) -> Result<String, String> {
+    if value.contains('#') {
+        return Err(format!("origin 不允许包含路径、查询或片段：{value}"));
+    }
+    let uri = value
+        .parse::<Uri>()
+        .map_err(|_| format!("origin 无效：{value}"))?;
+    let scheme = uri
+        .scheme_str()
+        .filter(|scheme| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        })
+        .ok_or_else(|| format!("origin 只允许 http 或 https：{value}"))?
+        .to_ascii_lowercase();
+    let authority = uri
+        .authority()
+        .filter(|authority| !authority.as_str().contains('@'))
+        .ok_or_else(|| format!("origin 缺少有效主机：{value}"))?;
+    if uri.query().is_some() || uri.path() != "/" {
+        return Err(format!("origin 不允许包含路径、查询或片段：{value}"));
+    }
+
+    let host = authority.host().to_ascii_lowercase();
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let default_port = matches!(
+        (scheme.as_str(), authority.port_u16()),
+        ("http", Some(80)) | ("https", Some(443))
+    );
+    let authority = match authority.port_u16() {
+        Some(port) if !default_port => format!("{host}:{port}"),
+        _ => host,
+    };
+    Ok(format!("{scheme}://{authority}"))
+}
+
+fn parse_metrics_token(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.len() < 16 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err("METRICS_TOKEN 至少需要 16 个无空白 ASCII 字符".to_owned());
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn parse_port(value: &str) -> Result<u16, String> {
@@ -364,6 +444,51 @@ mod tests {
         assert_eq!(
             server.credential.as_deref(),
             Some("0+nEZmta9rUoejsKJGUY3/cLHK8=")
+        );
+    }
+
+    #[test]
+    fn normalizes_configured_origins() {
+        let origins = parse_allowed_origins(Some(
+            r#"["HTTPS://Camera.Example.com:443/","http://localhost:5011"]"#,
+        ))
+        .expect("valid origins");
+        assert_eq!(
+            origins,
+            vec![
+                "https://camera.example.com".to_owned(),
+                "http://localhost:5011".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_duplicate_origins() {
+        for value in [
+            "not-json",
+            "[]",
+            r#"["ftp://camera.example.com"]"#,
+            r#"["https://camera.example.com/path"]"#,
+            r#"["https://camera.example.com?query=1"]"#,
+            r#"["https://camera.example.com#fragment"]"#,
+            r#"["https://user@camera.example.com"]"#,
+            r#"["https://camera.example.com","HTTPS://CAMERA.EXAMPLE.COM:443/"]"#,
+        ] {
+            assert!(
+                parse_allowed_origins(Some(value)).is_err(),
+                "origin configuration should be rejected: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn validates_optional_metrics_token() {
+        assert_eq!(parse_metrics_token(None).expect("missing token"), None);
+        assert!(parse_metrics_token(Some("too-short")).is_err());
+        assert!(parse_metrics_token(Some("contains whitespace token")).is_err());
+        assert_eq!(
+            parse_metrics_token(Some("0123456789abcdef")).expect("valid token"),
+            Some("0123456789abcdef".to_owned())
         );
     }
 }

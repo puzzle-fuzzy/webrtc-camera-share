@@ -20,13 +20,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ice_servers,
         turn,
         trust_proxy,
+        allowed_origins,
+        metrics_token,
     } = Config::from_env()?;
     let listener = TcpListener::bind(address).await?;
 
     tracing::info!(address = %address, web_dist = %web_dist.display(), "server started");
 
     let app = build_app(
-        AppState::new(limits, ice_servers, turn, trust_proxy),
+        AppState::new(limits, ice_servers, turn, trust_proxy)
+            .with_security(allowed_origins, metrics_token),
         web_dist,
     );
 

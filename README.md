@@ -105,6 +105,8 @@ cargo xtask build
 | `MAX_RECEIVERS` | `8` | 每个房间的接收端上限，范围 1–8 |
 | `MAX_ROOMS` | `128` | 内存中同时存在的房间上限，范围 1–1024，且不大于全局连接上限 |
 | `TRUST_PROXY` | `false` | 是否信任 `X-Forwarded-For`/`X-Real-IP`；仅在可信反向代理会覆盖这些头时启用 |
+| `ALLOWED_ORIGINS_JSON` | 未设置 | 允许建立浏览器 WebSocket 的 HTTP/HTTPS origin JSON 数组；未设置时只接受与请求 `Host` 匹配的 origin，无 `Origin` 的非浏览器客户端仍可连接 |
+| `METRICS_TOKEN` | 未设置 | `/metrics` 的可选 Bearer token，至少 16 个无空白 ASCII 字符；生产环境必须设置 |
 | `ICE_SERVERS_JSON` | 公共 STUN 列表 | 公开下发的 `RTCIceServer[]` JSON；只允许无凭据的 STUN URL |
 | `TURN_URLS_JSON` | 未启用 | 一个 TURN URL 字符串，或由多个 `turn:`/`turns:` URL 组成的 JSON 数组 |
 | `TURN_SHARED_SECRET` | 未启用 | 与 coturn `static-auth-secret` 相同的共享密钥，至少 16 个字符 |
@@ -122,7 +124,7 @@ TURN_TTL_SECONDS=3600
 
 coturn 需启用 `use-auth-secret`，并把 `static-auth-secret` 配置为相同密钥。后台只会在房间鉴权成功后向该 WebSocket 下发临时凭据；公开的 `/config` 不包含 TURN 密钥或凭据。生产环境还应在 coturn 设置合理的 `user-quota`、`total-quota` 和带宽上限，形成签发端与中继端两层保护。
 
-`/health` 只表示进程存活；`/ready` 还会确认生产前端的 `index.html` 可用；`/metrics` 返回房间、连接、排队信令字节数、限流、TURN 签发拒绝与鉴权拦截等 JSON 指标。容器编排和负载均衡应使用 `/ready` 接收流量，并在外部监控进程 RSS 与 `/metrics` 中的 `queuedSignalBytes`。
+`/health` 只表示进程存活；`/ready` 还会确认生产前端的 `index.html` 可用；`/metrics` 返回房间、连接、排队信令字节数、限流、TURN 签发拒绝与鉴权拦截等 JSON 指标。配置 `METRICS_TOKEN` 后，请使用 `Authorization: Bearer <token>` 访问指标，缺失或错误的凭据会得到 `401`。容器编排和负载均衡应使用 `/ready` 接收流量，并在外部监控进程 RSS 与 `/metrics` 中的 `queuedSignalBytes`。
 
 ## 验证
 
