@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Camera Share</title>
+  <desc id="desc">深蓝圆形徽标，中心是米白色几何大写 S。</desc>
+  <circle cx="32" cy="32" r="30" fill="#123dbb" />
+  <path d="M45 18c-3-3-7-4-13-4-7 0-12 3-12 8 0 5 4 7 12 9 8 2 12 5 12 10 0 6-5 9-12 9-6 0-11-2-14-6" fill="none" stroke="#f4f3ef" stroke-linecap="square" stroke-linejoin="round" stroke-width="5" />
+</svg>
