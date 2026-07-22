@@ -18,6 +18,7 @@ use axum::{
 };
 use serde::Serialize;
 use subtle::ConstantTimeEq;
+use tokio::sync::watch;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -43,6 +44,7 @@ pub struct AppState {
     trust_proxy: bool,
     allowed_origins: Arc<Vec<String>>,
     metrics_token: Option<Arc<String>>,
+    shutdown: watch::Sender<bool>,
 }
 
 impl AppState {
@@ -52,6 +54,7 @@ impl AppState {
         turn: Option<TurnConfig>,
         trust_proxy: bool,
     ) -> Self {
+        let (shutdown, _) = watch::channel(false);
         Self {
             rooms: Arc::new(Mutex::new(RoomRegistry::new(
                 limits.max_receivers,
@@ -70,6 +73,7 @@ impl AppState {
             trust_proxy,
             allowed_origins: Arc::new(Vec::new()),
             metrics_token: None,
+            shutdown,
         }
     }
 
@@ -81,6 +85,14 @@ impl AppState {
         self.allowed_origins = Arc::new(allowed_origins);
         self.metrics_token = metrics_token.map(Arc::new);
         self
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    fn subscribe_shutdown(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
     }
 
     fn disconnect_overloaded_peer(&self, peer: &PeerSender) {

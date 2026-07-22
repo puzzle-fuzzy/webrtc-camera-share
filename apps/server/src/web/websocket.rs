@@ -102,6 +102,12 @@ async fn handle_socket(
     else {
         return;
     };
+    let mut shutdown = state.subscribe_shutdown();
+    if *shutdown.borrow() {
+        close_socket(&mut socket, 1012, "service restart").await;
+        disconnect_peer(&state, &room_id, role, peer_id);
+        return;
+    }
 
     if state.turn.is_some() && !state.turn_credentials.allow(ip) {
         state.metrics.record_turn_credential_rejection();
@@ -149,6 +155,18 @@ async fn handle_socket(
 
     let writer_finished = loop {
         tokio::select! {
+            shutdown_result = shutdown.changed() => {
+                if shutdown_result.is_ok() && *shutdown.borrow() {
+                    let _ = send_outbound(
+                        &outbound,
+                        OutboundMessage::Close {
+                            code: 1012,
+                            reason: "service restart".to_owned(),
+                        },
+                    );
+                }
+                break false;
+            }
             _ = outbound.cancelled() => break false,
             writer_result = &mut writer => {
                 if let Err(error) = writer_result {

@@ -1,4 +1,9 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    io::{Read, Write},
+    net::{SocketAddr, TcpStream},
+    path::PathBuf,
+    time::Duration,
+};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -15,6 +20,7 @@ type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 struct TestServer {
     address: SocketAddr,
+    state: AppState,
     task: JoinHandle<()>,
 }
 
@@ -34,10 +40,8 @@ impl TestServer {
             .await
             .expect("bind test server");
         let address = listener.local_addr().expect("test server address");
-        let app = build_app(
-            AppState::new(limits, Vec::new(), None, false).with_security(origins, None),
-            PathBuf::from("missing-test-dist"),
-        );
+        let state = AppState::new(limits, Vec::new(), None, false).with_security(origins, None);
+        let app = build_app(state.clone(), PathBuf::from("missing-test-dist"));
         let task = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -46,7 +50,11 @@ impl TestServer {
             .await
             .expect("test server failed");
         });
-        Self { address, task }
+        Self {
+            address,
+            state,
+            task,
+        }
     }
 
     async fn connect(&self, role: &str, room: &str) -> ClientSocket {
@@ -67,6 +75,28 @@ impl TestServer {
             HeaderValue::from_str(origin).expect("valid origin header"),
         );
         connect_async(request).await.map(|(socket, _)| socket)
+    }
+
+    async fn health(&self) -> Value {
+        let address = self.address;
+        tokio::task::spawn_blocking(move || {
+            let mut stream = TcpStream::connect(address).expect("connect health endpoint");
+            stream
+                .write_all(
+                    format!("GET /health HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .expect("write health request");
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .expect("read health response");
+            let response = String::from_utf8(response).expect("UTF-8 health response");
+            let (_, body) = response.split_once("\r\n\r\n").expect("HTTP response body");
+            serde_json::from_str(body).expect("health JSON")
+        })
+        .await
+        .expect("health task")
     }
 }
 
@@ -112,6 +142,34 @@ async fn next_close(socket: &mut ClientSocket) -> CloseFrame {
                 .expect("reply to ping"),
             other => panic!("expected close message, got {other:?}"),
         }
+    }
+}
+
+#[tokio::test]
+async fn graceful_shutdown_closes_active_sockets_and_cleans_rooms() {
+    let server = TestServer::start(ResourceLimits::default()).await;
+    let mut sender = server.connect("send", "shutdown-room").await;
+    authenticate(&mut sender, "123456").await;
+
+    let health = server.health().await;
+    assert_eq!(health["rooms"], 1);
+    assert_eq!(health["peers"], 1);
+    assert_eq!(health["connections"], 1);
+
+    server.state.begin_shutdown();
+    assert_eq!(u16::from(next_close(&mut sender).await.code), 1012);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let health = server.health().await;
+        if health["rooms"] == 0 && health["peers"] == 0 && health["connections"] == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "shutdown resources were not released: {health}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 

@@ -27,17 +27,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::info!(address = %address, web_dist = %web_dist.display(), "server started");
 
-    let app = build_app(
-        AppState::new(limits, ice_servers, turn, trust_proxy)
-            .with_security(allowed_origins, metrics_token),
-        web_dist,
-    );
+    let state = AppState::new(limits, ice_servers, turn, trust_proxy)
+        .with_security(allowed_origins, metrics_token);
+    let shutdown_state = state.clone();
+    let app = build_app(state, web_dist);
 
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        shutdown_state.begin_shutdown();
+    })
     .await?;
 
     Ok(())
