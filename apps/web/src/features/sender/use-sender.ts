@@ -6,6 +6,16 @@ import {
   parseServerSignal,
 } from "@/features/signaling"
 import { socketUrl, type Session } from "@/features/session"
+import {
+  currentBrowserEnvironment,
+  senderEnvironmentIssue,
+} from "@/features/browser-environment"
+import {
+  errorStatus,
+  infoStatus,
+  successStatus,
+  type ConnectionStatus,
+} from "@/features/connection-status"
 
 const TOTAL_VIDEO_BITRATE_BUDGET = 6_000_000
 const MIN_VIDEO_BITRATE_PER_VIEWER = 300_000
@@ -38,7 +48,10 @@ export function useSender() {
   const generationRef = useRef(0)
   const activeRef = useRef(false)
   const [running, setRunning] = useState(false)
-  const [status, setStatus] = useState("配置房间后开始发送")
+  const [status, setStatus] = useState<ConnectionStatus>(() =>
+    infoStatus("配置房间后开始发送"),
+  )
+  const [hasMedia, setHasMedia] = useState(false)
   const [viewers, setViewers] = useState<ViewerCount>({
     connected: 0,
     total: 0,
@@ -123,6 +136,7 @@ export function useSender() {
 
       streamRef.current?.getTracks().forEach((track) => track.stop())
       streamRef.current = null
+      if (updateState) setHasMedia(false)
       closeAllPeerConnections(updateState)
       if (previewRef.current) previewRef.current.srcObject = null
     },
@@ -130,10 +144,10 @@ export function useSender() {
   )
 
   const stop = useCallback(
-    (message = "已停止") => {
+    (nextStatus: ConnectionStatus = infoStatus("已停止发送")) => {
       releaseResources(true)
       setRunning(false)
-      setStatus(message)
+      setStatus(nextStatus)
     },
     [releaseResources],
   )
@@ -199,8 +213,8 @@ export function useSender() {
           closePeerConnection(peerId)
           setStatus(
             iceRestart
-              ? "一个接收端恢复连接失败，已释放该连接"
-              : "为一个接收端创建连接失败",
+              ? errorStatus("一个接收端恢复连接失败，已释放该连接")
+              : errorStatus("无法为一个接收端建立连接，已释放该连接"),
           )
         }
         return false
@@ -221,7 +235,7 @@ export function useSender() {
           return
         }
 
-        setStatus("一个接收端连接中断，正在尝试 ICE 恢复...")
+        setStatus(infoStatus("一个接收端连接中断，正在尝试恢复..."))
         void sendPeerOffer(peerId, peer, true).then((sent) => {
           if (!sent || peersRef.current.get(peerId) !== peer) return
           peer.recoveryTimer = window.setTimeout(() => {
@@ -231,7 +245,7 @@ export function useSender() {
               peer.connection.connectionState !== "connected"
             ) {
               closePeerConnection(peerId)
-              setStatus("一个接收端恢复超时，已释放该连接")
+              setStatus(errorStatus("一个接收端恢复超时，已释放该连接"))
             }
           }, ICE_RECOVERY_TIMEOUT_MS)
         })
@@ -266,7 +280,7 @@ export function useSender() {
           if (peer.offerPending) {
             if (peer.localIceCandidates.length >= MAX_PENDING_ICE_CANDIDATES) {
               closePeerConnection(peerId)
-              setStatus("本地 ICE 候选过多，已释放该连接")
+              setStatus(errorStatus("连接候选数据过多，已释放该接收端连接"))
               return
             }
             peer.localIceCandidates.push(candidate)
@@ -287,10 +301,10 @@ export function useSender() {
           const connected = [...peersRef.current.values()].filter(
             (candidate) => candidate.connection.connectionState === "connected",
           ).length
-          setStatus(`${connected} 个接收端已连接`)
+          setStatus(successStatus(`${connected} 个接收端已连接`))
         } else if (connection.connectionState === "failed") {
           closePeerConnection(peerId)
-          setStatus("一个接收端连接失败，继续等待...")
+          setStatus(errorStatus("一个接收端连接失败，已释放该连接"))
         }
       }
       connection.oniceconnectionstatechange = () => {
@@ -298,14 +312,14 @@ export function useSender() {
           peersRef.current.get(peerId) === peer &&
           connection.iceConnectionState === "disconnected"
         ) {
-          setStatus("一个接收端暂时断开，正在恢复...")
+          setStatus(infoStatus("一个接收端暂时断开，正在恢复..."))
           scheduleIceRecovery(peerId, peer)
         }
       }
 
       updateViewerCount()
       void rebalanceVideoBitrates()
-      setStatus(`${peersRef.current.size} 个接收端已加入，正在协商...`)
+      setStatus(infoStatus(`${peersRef.current.size} 个接收端已加入，正在协商...`))
 
       await sendPeerOffer(peerId, peer)
     },
@@ -322,12 +336,19 @@ export function useSender() {
   const start = useCallback(
     async (session: Session) => {
       if (activeRef.current) return
+      const environmentIssue = senderEnvironmentIssue(
+        currentBrowserEnvironment(),
+      )
+      if (environmentIssue) {
+        setStatus(environmentIssue)
+        return
+      }
       activeRef.current = true
 
       const generation = generationRef.current + 1
       generationRef.current = generation
       setRunning(true)
-      setStatus("正在请求摄像头权限...")
+      setStatus(infoStatus("正在请求摄像头权限..."))
 
       try {
         const configController = new AbortController()
@@ -358,6 +379,7 @@ export function useSender() {
           previewRef.current.srcObject = stream
           await previewRef.current.play()
         }
+        setHasMedia(true)
         if (generationRef.current !== generation) return
 
         const socket = new WebSocket(socketUrl("send", session))
@@ -365,7 +387,7 @@ export function useSender() {
         socket.onopen = () => {
           if (socketRef.current === socket) {
             socket.send(JSON.stringify({ type: "authenticate", key: session.key }))
-            setStatus("正在验证房间访问码...")
+            setStatus(infoStatus("正在验证房间访问码..."))
           }
         }
         socket.onmessage = async (event) => {
@@ -375,7 +397,7 @@ export function useSender() {
 
           if (signal.type === "authenticated") {
             rtcConfigurationRef.current = { iceServers: signal.iceServers }
-            setStatus(`已加入 ${session.room}，等待接收端...`)
+            setStatus(successStatus(`已加入 ${session.room}，等待接收端...`))
             return
           }
           if (signal.type === "receiver-ready") {
@@ -386,8 +408,8 @@ export function useSender() {
             closePeerConnection(signal.peerId)
             setStatus(
               peersRef.current.size === 0
-                ? "接收端已全部离线，继续等待..."
-                : `${peersRef.current.size} 个接收端仍在线`,
+                ? infoStatus("接收端已全部离线，继续等待...")
+                : successStatus(`${peersRef.current.size} 个接收端仍在线`),
             )
             return
           }
@@ -395,7 +417,7 @@ export function useSender() {
             if (signal.code === "PEER_NOT_FOUND" && signal.peerId) {
               closePeerConnection(signal.peerId)
             }
-            setStatus(`信令错误：${signal.message}`)
+            setStatus(errorStatus(`连接服务返回错误：${signal.message}`))
             return
           }
 
@@ -406,12 +428,12 @@ export function useSender() {
               await peer.connection.setRemoteDescription(signal.sdp)
               await processIceCandidates(signal.peerId, peer)
               if (peersRef.current.get(signal.peerId) === peer) {
-                setStatus("已收到接收端应答，正在建立连接...")
+                setStatus(infoStatus("已收到接收端应答，正在建立连接..."))
               }
             } catch {
               if (peersRef.current.get(signal.peerId) === peer) {
                 closePeerConnection(signal.peerId)
-                setStatus("接收端应答无效，已关闭该连接")
+                setStatus(errorStatus("接收端应答无效，已关闭该连接"))
               }
             }
           } else if ("ice" in signal && signal.peerId) {
@@ -419,7 +441,7 @@ export function useSender() {
             if (!peer) return
             if (peer.iceCandidates.length >= MAX_PENDING_ICE_CANDIDATES) {
               closePeerConnection(signal.peerId)
-              setStatus("一个接收端发送了过多 ICE 候选，已关闭该连接")
+              setStatus(errorStatus("一个接收端发送了过多连接候选，已关闭该连接"))
               return
             }
             peer.iceCandidates.push(signal.ice)
@@ -427,20 +449,26 @@ export function useSender() {
           }
         }
         socket.onerror = () => {
-          if (socketRef.current === socket) setStatus("WebSocket 连接错误")
+          if (socketRef.current === socket) {
+            setStatus(errorStatus("无法连接信令服务，请检查网络和服务状态"))
+          }
         }
         socket.onclose = (event) => {
           if (socketRef.current !== socket) return
-          stop(senderCloseMessage(event.code))
+          stop(senderCloseStatus(event.code))
         }
-        setStatus("正在连接信令服务...")
+        setStatus(infoStatus("正在连接信令服务..."))
       } catch (error) {
         if (generationRef.current !== generation) return
         const name = error instanceof DOMException ? error.name : ""
         const message = error instanceof Error ? error.message : String(error)
-        if (name === "NotAllowedError") stop("摄像头权限被拒绝")
-        else if (name === "NotFoundError") stop("未找到摄像头设备")
-        else stop(`错误：${message}`)
+        if (name === "NotAllowedError") {
+          stop(errorStatus("摄像头权限被拒绝，请在浏览器设置中允许后重试"))
+        } else if (name === "NotFoundError") {
+          stop(errorStatus("没有找到可用摄像头，请连接设备后重试"))
+        } else {
+          stop(errorStatus(`无法开始发送：${message}`))
+        }
       }
     },
     [
@@ -457,6 +485,7 @@ export function useSender() {
     previewRef,
     running,
     status,
+    hasMedia,
     viewers,
     setStatus,
     start,
@@ -464,27 +493,29 @@ export function useSender() {
   }
 }
 
-function senderCloseMessage(code: number): string {
+function senderCloseStatus(code: number): ConnectionStatus {
   switch (code) {
     case 4000:
-      return "鉴权请求无效"
+      return errorStatus("房间验证请求无效，请重新开始")
     case 4003:
-      return "访问码不正确，房间已由其他访问码创建"
+      return errorStatus("访问码不正确，这个房间已使用其他访问码")
     case 4008:
-      return "连接空闲超时，请重新开始"
+      return errorStatus("连接长时间无响应，请重新开始")
     case 4009:
-      return "该房间已有发送端在线"
+      return errorStatus("该房间已有发送端在线，请生成新会话")
     case 4028:
-      return "访问码尝试次数过多，请稍后重试"
+      return errorStatus("访问码尝试次数过多，请稍后重试")
     case 4011:
-      return "服务房间数量已达上限，请稍后重试"
+      return errorStatus("当前房间数量已达服务上限，请稍后重试")
     case 4012:
-      return "房间鉴权超时，请重新开始"
+      return errorStatus("房间验证超时，请重新开始")
     case 4029:
-      return "信令发送过快，连接已关闭"
+      return errorStatus("连接消息发送过快，服务已关闭连接")
     case 4030:
-      return "临时 TURN 凭据请求过多，请稍后重试"
+      return errorStatus("中继凭据请求过多，请稍后重试")
+    case 1012:
+      return errorStatus("服务正在重启，请稍后重新连接")
     default:
-      return "信令连接已关闭"
+      return errorStatus("信令连接已关闭，请检查网络后重试")
   }
 }

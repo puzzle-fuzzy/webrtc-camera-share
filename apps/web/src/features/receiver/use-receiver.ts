@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import {
+  currentBrowserEnvironment,
+  receiverEnvironmentIssue,
+} from "@/features/browser-environment"
+import {
+  connectionStateStatus,
+  errorStatus,
+  infoStatus,
+  successStatus,
+  type ConnectionStatus,
+} from "@/features/connection-status"
+import {
   loadRuntimeConfiguration,
   MAX_PENDING_ICE_CANDIDATES,
   parseServerSignal,
@@ -22,31 +33,36 @@ export function useReceiver() {
   const activeRef = useRef(false)
   const maxReceiversRef = useRef(8)
   const [running, setRunning] = useState(false)
-  const [status, setStatus] = useState(
-    "输入房间信息或使用发送端分享链接",
+  const [status, setStatus] = useState<ConnectionStatus>(() =>
+    infoStatus("输入房间信息或使用发送端分享链接"),
   )
+  const [hasMedia, setHasMedia] = useState(false)
 
-  const closePeerConnection = useCallback((clearCandidates = true) => {
-    const connection = connectionRef.current
-    connectionRef.current = null
-    if (processingIceRef.current === connection) processingIceRef.current = null
-    if (recoveryTimerRef.current !== null) {
-      clearTimeout(recoveryTimerRef.current)
-      recoveryTimerRef.current = null
-    }
-    if (clearCandidates) iceCandidatesRef.current = []
-    if (connection) {
-      connection.onicecandidate = null
-      connection.onconnectionstatechange = null
-      connection.oniceconnectionstatechange = null
-      connection.ontrack = null
-      connection.close()
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null
-      videoRef.current.muted = true
-    }
-  }, [])
+  const closePeerConnection = useCallback(
+    (clearCandidates = true, updateState = true) => {
+      const connection = connectionRef.current
+      connectionRef.current = null
+      if (processingIceRef.current === connection) processingIceRef.current = null
+      if (recoveryTimerRef.current !== null) {
+        clearTimeout(recoveryTimerRef.current)
+        recoveryTimerRef.current = null
+      }
+      if (clearCandidates) iceCandidatesRef.current = []
+      if (connection) {
+        connection.onicecandidate = null
+        connection.onconnectionstatechange = null
+        connection.oniceconnectionstatechange = null
+        connection.ontrack = null
+        connection.close()
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null
+        videoRef.current.muted = true
+      }
+      if (updateState) setHasMedia(false)
+    },
+    [],
+  )
 
   const releaseResources = useCallback(
     (updateState: boolean) => {
@@ -57,16 +73,16 @@ export function useReceiver() {
       const socket = socketRef.current
       socketRef.current = null
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000)
-      closePeerConnection()
+      closePeerConnection(true, updateState)
       if (updateState) setRunning(false)
     },
     [closePeerConnection],
   )
 
   const stop = useCallback(
-    (message = "已停止") => {
+    (nextStatus: ConnectionStatus = infoStatus("已停止接收")) => {
       releaseResources(true)
-      setStatus(message)
+      setStatus(nextStatus)
     },
     [releaseResources],
   )
@@ -122,12 +138,12 @@ export function useReceiver() {
           recoveryTimerRef.current = null
         }
         if (videoRef.current) videoRef.current.muted = false
-        setStatus("连接建立")
+        setStatus(successStatus("视频连接已建立"))
       } else if (connection.connectionState === "failed") {
         closePeerConnection()
-        setStatus("连接失败，请停止后重试")
+        setStatus(errorStatus("视频连接失败，请停止后重试"))
       } else {
-        setStatus(connection.connectionState)
+        setStatus(connectionStateStatus(connection.connectionState))
       }
     }
     connection.oniceconnectionstatechange = () => {
@@ -135,7 +151,7 @@ export function useReceiver() {
         connectionRef.current === connection &&
         connection.iceConnectionState === "disconnected"
       ) {
-        setStatus("ICE 暂时断开，正在恢复...")
+        setStatus(infoStatus("视频连接暂时中断，正在恢复..."))
         if (recoveryTimerRef.current === null) {
           recoveryTimerRef.current = window.setTimeout(() => {
             recoveryTimerRef.current = null
@@ -144,7 +160,7 @@ export function useReceiver() {
               connection.connectionState !== "connected"
             ) {
               closePeerConnection()
-              setStatus("ICE 恢复超时，请停止后重新接收")
+              setStatus(errorStatus("连接恢复超时，请停止后重新接收"))
             }
           }, ICE_RECOVERY_TIMEOUT_MS)
         }
@@ -154,12 +170,13 @@ export function useReceiver() {
       if (connectionRef.current !== connection || !videoRef.current) return
       videoRef.current.srcObject =
         event.streams[0] ?? new MediaStream([event.track])
+      setHasMedia(true)
       void videoRef.current.play().catch(() => {
         if (connectionRef.current === connection) {
-          setStatus("已收到视频流，请点击播放器开始播放")
+          setStatus(infoStatus("已收到视频，请点击播放器开始播放"))
         }
       })
-      setStatus("收到视频流")
+      setStatus(successStatus("已收到视频画面"))
     }
 
     return connection
@@ -178,12 +195,12 @@ export function useReceiver() {
         await connection.setLocalDescription(answer)
         if (connectionRef.current === connection) {
           sendSignal({ sdp: answer })
-          setStatus("已回复应答，正在建立连接...")
+          setStatus(infoStatus("已回复发送端，正在建立视频连接..."))
         }
       } catch {
         if (connectionRef.current === connection) {
           closePeerConnection()
-          setStatus("处理连接请求失败")
+          setStatus(errorStatus("无法处理发送端的连接请求，请停止后重试"))
         }
       }
     },
@@ -193,12 +210,19 @@ export function useReceiver() {
   const start = useCallback(
     async (session: Session) => {
       if (activeRef.current) return
+      const environmentIssue = receiverEnvironmentIssue(
+        currentBrowserEnvironment(),
+      )
+      if (environmentIssue) {
+        setStatus(environmentIssue)
+        return
+      }
       activeRef.current = true
 
       const generation = generationRef.current + 1
       generationRef.current = generation
       setRunning(true)
-      setStatus("正在加载连接配置...")
+      setStatus(infoStatus("正在加载连接配置..."))
       if (videoRef.current) videoRef.current.muted = true
 
       const configController = new AbortController()
@@ -218,7 +242,7 @@ export function useReceiver() {
       socket.onopen = () => {
         if (socketRef.current !== socket || generationRef.current !== generation) return
         socket.send(JSON.stringify({ type: "authenticate", key: session.key }))
-        setStatus("正在验证房间访问码...")
+        setStatus(infoStatus("正在验证房间访问码..."))
       }
       socket.onmessage = async (event) => {
         if (socketRef.current !== socket) return
@@ -228,24 +252,24 @@ export function useReceiver() {
         if (signal.type === "authenticated") {
           rtcConfigurationRef.current = { iceServers: signal.iceServers }
           maxReceiversRef.current = signal.maxReceivers
-          setStatus(`已加入 ${session.room}，等待发送端...`)
+          setStatus(successStatus(`已加入 ${session.room}，等待发送端...`))
           sendSignal({ type: "receiver-ready" })
           return
         }
         if (signal.type === "peer-left" && signal.role === "send") {
           closePeerConnection()
-          setStatus("发送端已离线，继续等待...")
+          setStatus(infoStatus("发送端已离线，继续等待重新连接..."))
           return
         }
         if (signal.type === "error") {
-          setStatus(`信令错误：${signal.message}`)
+          setStatus(errorStatus(`连接服务返回错误：${signal.message}`))
           return
         }
         if ("sdp" in signal && signal.sdp.type === "offer") {
           await handleOffer(signal.sdp)
         } else if ("ice" in signal) {
           if (iceCandidatesRef.current.length >= MAX_PENDING_ICE_CANDIDATES) {
-            stop("收到过多 ICE 候选，连接已关闭")
+            stop(errorStatus("收到过多连接候选，连接已关闭，请重新加入"))
             return
           }
           iceCandidatesRef.current.push(signal.ice)
@@ -255,13 +279,15 @@ export function useReceiver() {
         }
       }
       socket.onerror = () => {
-        if (socketRef.current === socket) setStatus("WebSocket 连接错误")
+        if (socketRef.current === socket) {
+          setStatus(errorStatus("无法连接信令服务，请检查网络和服务状态"))
+        }
       }
       socket.onclose = (event) => {
         if (socketRef.current !== socket) return
-        stop(receiverCloseMessage(event.code, maxReceiversRef.current))
+        stop(receiverCloseStatus(event.code, maxReceiversRef.current))
       }
-      setStatus("正在连接信令服务...")
+      setStatus(infoStatus("正在连接信令服务..."))
     },
     [
       closePeerConnection,
@@ -278,34 +304,40 @@ export function useReceiver() {
     videoRef,
     running,
     status,
+    hasMedia,
     start,
     stop,
   }
 }
 
-function receiverCloseMessage(code: number, maxReceivers: number): string {
+function receiverCloseStatus(
+  code: number,
+  maxReceivers: number,
+): ConnectionStatus {
   switch (code) {
     case 4000:
-      return "鉴权请求无效"
+      return errorStatus("房间验证请求无效，请重新加入")
     case 4003:
-      return "访问码不正确，房间已由其他访问码创建"
+      return errorStatus("访问码不正确，这个房间已使用其他访问码")
     case 4008:
-      return "连接空闲超时，请重新加入"
+      return errorStatus("连接长时间无响应，请重新加入")
     case 4010:
-      return `房间接收端已满，最多支持 ${maxReceivers} 个`
+      return errorStatus(`房间接收端已满，最多支持 ${maxReceivers} 个`)
     case 4011:
-      return "服务房间数量已达上限，请稍后重试"
+      return errorStatus("当前房间数量已达服务上限，请稍后重试")
     case 4012:
-      return "房间鉴权超时，请重新加入"
+      return errorStatus("房间验证超时，请重新加入")
     case 4028:
-      return "访问码尝试次数过多，请稍后重试"
+      return errorStatus("访问码尝试次数过多，请稍后重试")
     case 4029:
-      return "信令发送过快，连接已关闭"
+      return errorStatus("连接消息发送过快，服务已关闭连接")
     case 4030:
-      return "临时 TURN 凭据请求过多，请稍后重试"
+      return errorStatus("中继凭据请求过多，请稍后重试")
+    case 1012:
+      return errorStatus("服务正在重启，请稍后重新连接")
     case 1006:
-      return "无法加入房间，请检查房间信息和服务状态"
+      return errorStatus("无法加入房间，请检查房间信息和服务状态")
     default:
-      return "信令连接已关闭"
+      return errorStatus("信令连接已关闭，请检查网络后重新加入")
   }
 }

@@ -3,6 +3,7 @@ import {
   CameraIcon,
   CopyIcon,
   ExternalLinkIcon,
+  RefreshCwIcon,
   SquareIcon,
 } from "lucide-react"
 
@@ -20,13 +21,16 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { PageShell } from "@/features/page-shell"
 import { SessionFields } from "@/features/session-fields"
+import { errorStatus, successStatus } from "@/features/connection-status"
 import {
+  newSenderSession,
   persistSession,
   randomSenderSession,
   receiverUrl,
   validateSession,
 } from "@/features/session"
 import { StatusAlert } from "@/features/status-alert"
+import { VideoStage } from "@/features/video-stage"
 import { useSender } from "@/features/sender/use-sender"
 import { cn } from "@/lib/utils"
 
@@ -40,7 +44,6 @@ export function SenderPage() {
   )
   const issue = attempted && !validation.ok ? validation.issue : undefined
   const shareUrl = validation.ok ? receiverUrl(validation.session) : undefined
-  const status = issue?.message ?? sender.status
 
   const updateSession = (nextSession: typeof session) => {
     setSession(nextSession)
@@ -55,6 +58,12 @@ export function SenderPage() {
     await sender.start(validation.session)
   }
 
+  const rotateSession = () => {
+    setSession(newSenderSession())
+    setAttempted(false)
+    sender.setStatus(successStatus("已生成新的房间 ID 和访问码"))
+  }
+
   const copyReceiverLink = async () => {
     setAttempted(true)
     if (!validation.ok) return
@@ -62,9 +71,9 @@ export function SenderPage() {
     persistSession(validation.session)
     try {
       await navigator.clipboard.writeText(receiverUrl(validation.session).href)
-      sender.setStatus("接收链接已复制")
+      sender.setStatus(successStatus("接收链接已复制，可以发送给接收者"))
     } catch {
-      sender.setStatus("无法自动复制，请打开接收端后复制地址")
+      sender.setStatus(errorStatus("无法复制链接，请打开接收端后手动复制地址"))
     }
   }
 
@@ -90,15 +99,20 @@ export function SenderPage() {
             onChange={updateSession}
           />
           <Separator />
-          <video
-            ref={sender.previewRef}
-            className="aspect-video w-full"
+          <VideoStage
+            videoRef={sender.previewRef}
+            label="本地摄像头预览"
+            hasMedia={sender.hasMedia}
+            placeholder={
+              sender.running
+                ? "正在准备摄像头画面..."
+                : "开始发送后，这里会显示摄像头预览"
+            }
             autoPlay
             playsInline
             muted
-            aria-label="本地摄像头预览"
           />
-          <StatusAlert destructive={Boolean(issue)} message={status} />
+          <StatusAlert status={sender.status} />
         </CardContent>
         <CardFooter className="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap">
           {sender.running ? (
@@ -120,10 +134,18 @@ export function SenderPage() {
             variant="secondary"
             size="lg"
             onClick={copyReceiverLink}
-            disabled={sender.running}
           >
             <CopyIcon data-icon="inline-start" />
             复制接收链接
+          </Button>
+          <Button
+            variant="secondary"
+            size="lg"
+            onClick={rotateSession}
+            disabled={sender.running}
+          >
+            <RefreshCwIcon data-icon="inline-start" />
+            生成新会话
           </Button>
           {shareUrl ? (
             <a

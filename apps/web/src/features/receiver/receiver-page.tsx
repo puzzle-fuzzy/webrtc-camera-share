@@ -23,6 +23,7 @@ import {
   type Session,
 } from "@/features/session"
 import { StatusAlert } from "@/features/status-alert"
+import { VideoStage } from "@/features/video-stage"
 import { cn } from "@/lib/utils"
 
 function sessionFromLocation(): Session {
@@ -85,18 +86,20 @@ export function ReceiverPage() {
             onChange={updateSession}
           />
           <Separator />
-          <video
-            ref={receiver.videoRef}
-            className="aspect-video w-full"
+          <VideoStage
+            videoRef={receiver.videoRef}
+            label="远端摄像头画面"
+            hasMedia={receiver.hasMedia}
+            placeholder={
+              receiver.running
+                ? "正在等待发送端的视频画面..."
+                : "开始接收后，这里会显示发送端的画面"
+            }
             autoPlay
             controls
             playsInline
-            aria-label="远端摄像头画面"
           />
-          <StatusAlert
-            destructive={Boolean(issue)}
-            message={issue?.message ?? receiver.status}
-          />
+          <StatusAlert status={receiver.status} />
         </CardContent>
         <CardFooter className="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap">
           {receiver.running ? (

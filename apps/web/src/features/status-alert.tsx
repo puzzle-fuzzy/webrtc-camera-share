@@ -1,22 +1,23 @@
 import { RadioIcon } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import type { ConnectionStatus } from "@/features/connection-status"
 
 type StatusAlertProps = {
-  destructive?: boolean
-  message: string
+  status: ConnectionStatus
 }
 
-export function StatusAlert({ destructive = false, message }: StatusAlertProps) {
+export function StatusAlert({ status }: StatusAlertProps) {
+  const destructive = status.tone === "error"
   return (
     <Alert
       variant={destructive ? "destructive" : "default"}
-      role="status"
-      aria-live="polite"
+      role={destructive ? "alert" : "status"}
+      aria-live={destructive ? undefined : "polite"}
     >
       <RadioIcon />
       <AlertTitle>连接状态</AlertTitle>
-      <AlertDescription>{message}</AlertDescription>
+      <AlertDescription>{status.message}</AlertDescription>
     </Alert>
   )
 }

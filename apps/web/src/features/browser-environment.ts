@@ -22,7 +22,7 @@ export function currentBrowserEnvironment(): BrowserEnvironment {
     hasPeerConnection: typeof RTCPeerConnection !== "undefined",
     hasMediaDevices: mediaDevices !== undefined,
     hasGetUserMedia: typeof mediaDevices?.getUserMedia === "function",
-    hasCrypto: typeof crypto?.getRandomValues === "function",
+    hasCrypto: typeof globalThis.crypto?.getRandomValues === "function",
   }
 }
 
