@@ -128,9 +128,12 @@ coturn 需启用 `use-auth-secret`，并把 `static-auth-secret` 配置为相同
 
 ```bash
 cargo xtask verify
+cargo xtask e2e
 ```
 
-该命令校验 Bun 锁文件并安装依赖，然后执行前端类型检查、ESLint、Bun 单测、Vite 生产构建、Rust 格式检查，并分别在文件系统模式和内嵌模式执行 Clippy 与 Rust 单测。原有的 `bun run dev/build/verify` 仍作为兼容入口转发给 Cargo 工作流。
+`cargo xtask verify` 校验 Bun 锁文件并安装依赖，然后执行前端类型检查、Oxlint、Bun 单测、Vite 生产构建、Rust 格式检查，并分别在文件系统模式和内嵌模式执行 Clippy 与 Rust 单测。
+
+首次运行浏览器验收前执行 `bunx playwright install chromium`。`cargo xtask e2e` 会构建文件系统前端，自动选择仅回环可见的临时端口，启动 Rust 服务，并使用 Chromium 的模拟摄像头验证移动端布局、表单状态和真实 WebRTC 发送到接收流程；结束时会清理测试服务进程。
 
 ## 怎么使用
 
