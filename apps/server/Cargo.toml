@@ -13,20 +13,20 @@ embed-web = ["dep:mime_guess", "dep:rust-embed"]
 axum = { version = "0.8.8", features = ["ws"] }
 base64 = "0.22.1"
 futures-util = "0.3.32"
-hmac = "0.12.1"
+hmac = "0.13.0"
 mime_guess = { version = "2", optional = true }
 rust-embed = { version = "8", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-sha2 = "0.10.9"
-sha1 = "0.10.6"
+sha2 = "0.11.0"
+sha1 = "0.11.0"
 subtle = "2.6.1"
 tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tower-http = { version = "0.6.8", features = ["fs", "trace"] }
+tower-http = { version = "0.7.0", features = ["fs", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 uuid = { version = "1.21.0", features = ["serde", "v4"] }
 
 [dev-dependencies]
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }
