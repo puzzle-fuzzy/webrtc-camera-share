@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import {
+  newSenderSession,
   randomSenderSession,
   sessionFromHash,
   sessionHash,
@@ -61,5 +62,23 @@ describe("session", () => {
 
     expect(session.room).toMatch(/^demo-[a-f0-9]{24}$/)
     expect(session.key).toMatch(/^[a-f0-9]{32}$/)
+  })
+
+  test("rotates both sender credentials", () => {
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: new URL(
+        "https://camera.example/send#room=demo-existing&key=Existing123",
+      ),
+    })
+
+    const session = newSenderSession()
+
+    expect(session.room).toMatch(/^demo-[a-f0-9]{24}$/)
+    expect(session.key).toMatch(/^[a-f0-9]{32}$/)
+    expect(session).not.toEqual({
+      room: "demo-existing",
+      key: "Existing123",
+    })
   })
 })

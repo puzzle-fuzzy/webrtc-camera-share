@@ -78,8 +78,16 @@ export function socketUrl(role: "send" | "recv", session: Session): URL {
 export function randomSenderSession(): Session {
   const hash = sessionFromHash(location.hash)
   return {
-    room: hash.room ?? `demo-${randomHex(12)}`,
-    key: hash.key ?? randomHex(16),
+    ...newSenderSession(),
+    ...(hash.room ? { room: hash.room } : {}),
+    ...(hash.key ? { key: hash.key } : {}),
+  }
+}
+
+export function newSenderSession(): Session {
+  return {
+    room: `demo-${randomHex(12)}`,
+    key: randomHex(16),
   }
 }
 
