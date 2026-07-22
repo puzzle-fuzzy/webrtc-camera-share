@@ -137,6 +137,15 @@ cargo xtask e2e
 
 首次运行浏览器验收前执行 `bunx playwright install chromium`。`cargo xtask e2e` 会构建文件系统前端，自动选择仅回环可见的临时端口，启动 Rust 服务，并使用 Chromium 的模拟摄像头验证移动端布局、表单状态和真实 WebRTC 发送到接收流程；结束时会清理测试服务进程。
 
+发布二进制使用独立冒烟门禁：
+
+```bash
+cargo xtask release
+cargo xtask smoke -- target/release/webrtc-camera-share-server.exe
+```
+
+Linux 和 macOS 使用不带 `.exe` 的路径。冒烟会在临时回环端口启动二进制，检查存活、就绪、三个页面、运行时配置、指标 401/200、CSP、安全头和静态资源缓存，并始终清理测试进程。
+
 ## 怎么使用
 
 1. 按“本地开发”启动后，打开发送端 `http://127.0.0.1:5173/send`；生产环境直接打开后台地址的 `/send`。
@@ -152,7 +161,9 @@ cargo xtask e2e
 ```bash
 bun install --frozen-lockfile
 cargo xtask verify
+cargo xtask e2e
 cargo xtask release
+cargo xtask smoke -- target/release/webrtc-camera-share-server.exe
 ./target/release/webrtc-camera-share-server
 ```
 
@@ -161,6 +172,8 @@ cargo xtask release
 跨公网使用时必须提供 HTTPS 才能稳定获得浏览器摄像头权限。复杂 NAT 或企业网络环境应配置临时 TURN 凭据；仅使用公共 STUN 不能保证所有网络都能连通。
 
 当前媒体拓扑是有容量边界的 P2P fan-out：发送端会为每个接收端维护一个 PeerConnection，并在多个接收端之间分配总视频码率预算。默认 8 个接收端适合小规模临时共享；若需要几十或更多接收端，应改用 SFU（例如 LiveKit、Janus 或 mediasoup），而不是继续调高 `MAX_RECEIVERS`。
+
+CI 会分别执行规范验证、依赖审计、Chromium WebRTC 验收以及 Windows/Linux 发布冒烟。`v*` 标签只会创建带 SHA-256 校验文件的草稿 GitHub Release，不会自动公开发布。维护与协作约定见 [CHANGELOG.md](CHANGELOG.md)、[CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。
 
 ## License
 

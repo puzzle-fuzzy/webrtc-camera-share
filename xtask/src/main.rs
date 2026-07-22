@@ -17,10 +17,12 @@ const SERVER_PACKAGE: &str = "webrtc-camera-share-server";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let root = workspace_root()?;
-    match env::args().nth(1).as_deref() {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    match arguments.first().map(String::as_str) {
         Some("dev") => dev(&root),
         Some("verify") => verify(&root),
         Some("e2e") => e2e(&root),
+        Some("smoke") => smoke(&root, &arguments[1..]),
         Some("build") => build(&root, false),
         Some("release") => build(&root, true),
         Some("help" | "--help" | "-h") | None => {
@@ -50,6 +52,8 @@ Project workflows:
   cargo xtask dev      Start the Rust server and Vite development server
   cargo xtask verify   Install locked frontend dependencies and run all checks
   cargo xtask e2e      Run isolated Chromium UI and WebRTC acceptance tests
+  cargo xtask smoke -- <binary>
+                        Launch a release binary and verify production endpoints
   cargo xtask build    Build the frontend and filesystem-backed Rust release
   cargo xtask release  Build a standalone Rust release with embedded frontend"
     );
@@ -187,6 +191,24 @@ fn e2e(root: &Path) -> Result<(), Box<dyn Error>> {
 
     stop_child(&mut server);
     result
+}
+
+fn smoke(root: &Path, arguments: &[String]) -> Result<(), Box<dyn Error>> {
+    let arguments = arguments
+        .strip_prefix(&["--".to_owned()])
+        .unwrap_or(arguments);
+    let [binary] = arguments else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: cargo xtask smoke -- <binary>",
+        )
+        .into());
+    };
+    run(
+        root,
+        "python",
+        &["-X", "utf8", "scripts/smoke.py", "--binary", binary],
+    )
 }
 
 fn debug_server_executable(root: &Path) -> PathBuf {

@@ -1,0 +1,66 @@
+name: Draft release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.slug }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            slug: linux-x86_64
+            binary: target/release/webrtc-camera-share-server
+            archive: tar.gz
+          - os: windows-latest
+            slug: windows-x86_64
+            binary: target/release/webrtc-camera-share-server.exe
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - run: bun install --frozen-lockfile
+      - run: cargo xtask release
+      - run: cargo xtask smoke -- ${{ matrix.binary }}
+      - name: Package artifact and checksum
+        run: >-
+          python -X utf8 scripts/package_release.py
+          --binary ${{ matrix.binary }}
+          --output dist/webrtc-camera-share-${{ github.ref_name }}-${{ matrix.slug }}.${{ matrix.archive }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webrtc-camera-share-${{ matrix.slug }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft-release:
+    name: Create draft GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
