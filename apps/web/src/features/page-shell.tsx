@@ -31,7 +31,7 @@ export function PageShell({ children, currentPage }: PageShellProps) {
           href="/about"
         >
           <InfoIcon data-icon="inline-start" />
-          About
+          关于
         </a>
         <a
           className={cn(buttonVariants({ variant: "ghost", size: "lg" }))}

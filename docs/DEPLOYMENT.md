@@ -133,11 +133,12 @@ docker compose -f compose.example.yml --env-file .env logs --since=30m app caddy
 bun install --frozen-lockfile
 cargo xtask verify
 cargo xtask e2e
+python -X utf8 scripts/soak.py --receivers 2 --duration 300 --output target/soak/predeploy
 cargo xtask release
 cargo xtask smoke -- target/release/webrtc-camera-share-server
 ```
 
-Compose 部署使用新的不可变 `APP_IMAGE_TAG` 构建，不要覆盖仍在回滚窗口内的旧标签。启动后验证 `/ready`、受保护指标、一个真实 WebRTC 会话和 TURN relay，再清理旧镜像。
+soak 输出中的 `summary.json` 必须保持脱敏，只用于核对连接状态、服务计数和 RTCStats；不要把生产密钥作为命令参数或写入测试制品。Compose 部署使用新的不可变 `APP_IMAGE_TAG` 构建，不要覆盖仍在回滚窗口内的旧标签。启动后验证 `/ready`、受保护指标、一个真实 WebRTC 会话和 TURN relay，再清理旧镜像。
 
 回滚时恢复上一镜像标签和对应环境配置，运行 `docker compose ... up -d`，再重复健康、指标和会话验收。服务没有数据库或持久化房间，因此没有业务数据备份；需要备份的是加密存储中的密钥、证书续期配置、部署清单、告警规则和发布制品校验值。
 

@@ -81,7 +81,11 @@ fn dev(root: &Path) -> Result<(), Box<dyn Error>> {
     {
         Ok(child) => child,
         Err(error) => {
-            stop_child(&mut server);
+            stop_child(&mut server).map_err(|cleanup_error| {
+                io::Error::other(format!(
+                    "failed to start Vite: {error}; Rust server cleanup also failed: {cleanup_error}"
+                ))
+            })?;
             return Err(error.into());
         }
     };
@@ -89,16 +93,15 @@ fn dev(root: &Path) -> Result<(), Box<dyn Error>> {
     println!("development services started; press Ctrl+C to stop both");
     loop {
         if stopping.load(Ordering::SeqCst) {
-            stop_child(&mut server);
-            stop_child(&mut web);
+            stop_children(&mut [&mut server, &mut web])?;
             return Ok(());
         }
         if let Some(status) = server.try_wait()? {
-            stop_child(&mut web);
+            stop_child(&mut web)?;
             return child_result("Rust server", status);
         }
         if let Some(status) = web.try_wait()? {
-            stop_child(&mut server);
+            stop_child(&mut server)?;
             return child_result("Vite server", status);
         }
         thread::sleep(Duration::from_millis(100));
@@ -189,8 +192,16 @@ fn e2e(root: &Path) -> Result<(), Box<dyn Error>> {
         child_result("Playwright", status)
     })();
 
-    stop_child(&mut server);
-    result
+    let cleanup = stop_child(&mut server);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error.into()),
+        (Err(test_error), Err(cleanup_error)) => Err(io::Error::other(format!(
+            "{test_error}; test server cleanup also failed: {cleanup_error}"
+        ))
+        .into()),
+    }
 }
 
 fn smoke(root: &Path, arguments: &[String]) -> Result<(), Box<dyn Error>> {
@@ -300,9 +311,26 @@ fn child_result(name: &str, status: ExitStatus) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn stop_child(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(None)) {
-        let _ = child.kill();
-        let _ = child.wait();
+fn stop_child(child: &mut Child) -> io::Result<()> {
+    if child.try_wait()?.is_none() {
+        if let Err(error) = child.kill()
+            && child.try_wait()?.is_none()
+        {
+            return Err(error);
+        }
+        child.wait()?;
     }
+    Ok(())
+}
+
+fn stop_children(children: &mut [&mut Child]) -> io::Result<()> {
+    let mut first_error = None;
+    for child in children {
+        if let Err(error) = stop_child(child)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }

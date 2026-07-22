@@ -12,11 +12,13 @@
 - 增加跨平台发布冒烟、依赖自动更新、CI 和草稿 Release 工作流。
 - 增加非 root 应用镜像、Caddy/coturn/Compose/systemd 示例和完整生产运维手册。
 - 增加可由容器和 systemd 外部探针调用的内置 `--healthcheck`。
+- 增加 1/2/4/8 接收端有界 soak 工具、脱敏健康/指标/RTCStats 摘要和多视口发布验收。
 
 ### Changed
 
 - 收紧 Content Security Policy，仅允许同源连接。
 - 发送过程中继续允许复制接收链接，并为各入口设置独立页面标题。
+- 统一中文底部导航，并让视频与按钮在减少动画偏好下停用非必要过渡。
 
 ### Security
 

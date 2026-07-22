@@ -24,7 +24,7 @@ export function VideoStage({
         ref={videoRef}
         aria-label={label}
         className={cn(
-          "absolute inset-0 size-full bg-black object-contain transition-opacity",
+          "absolute inset-0 size-full bg-black object-contain transition-opacity motion-reduce:transition-none",
           hasMedia ? "opacity-100" : "pointer-events-none opacity-0",
           className,
         )}
